@@ -92,7 +92,7 @@ backup-btrfs prepare-live
 
 **Configuration Validation Tips:**
 - Always run `backup-btrfs validate` before your first backup
-- Use `--dry-run` to test backup operations without making changes  
+- Use `--dry-run` to test backup operations without making changes
 - Validation checks source paths, target accessibility, and configuration consistency
 - Fix any validation errors before proceeding with actual backups
 
@@ -301,12 +301,12 @@ remove_snapper_config = true
 
 **Hook Details:**
 
-1. **copy_kernel**: Copies kernel (`vmlinuz-*`) and initramfs (`initramfs-*.img`) from the live boot environment to the ESP. Also copies fallback initramfs if available.
+1. **copy_kernel**: Copies kernel (`vmlinuz-*`) and initramfs (`initramfs-*.img`) from `root_vol/boot/` in the live boot environment to the ESP. Also copies fallback initramfs if available. This ensures the backup environment can boot with the same kernel as the source system.
 
 2. **regenerate_fstab**: Creates a new `/etc/fstab` in the live boot environment with:
-   - Correct UUID-based device identifiers
+   - Correct UUID-based device identifiers for the Btrfs filesystem
    - Proper subvolume mounts (`@/root_vol`, `@/home_vol`, etc.)
-   - ESP mount if `/efi` exists
+   - ESP mount entry if `/efi` directory exists in the live environment
    - Swap configuration if present
 
 3. **remove_snapper_config**: Cleans up snapper configuration from the live boot environment to prevent snapper from modifying backup snapshots.
@@ -369,7 +369,7 @@ The target layout depends on whether live boot environment is enabled.
 # Target filesystem (backup destination)
 /
 ├── root_vol/            # Backups of /
-├── home_vol/            # Backups of /home  
+├── home_vol/            # Backups of /home
 └── var_vol/             # Backups of /var
 ```
 
@@ -384,22 +384,21 @@ The target layout depends on whether live boot environment is enabled.
 └── @/                   # Live boot environment (writable)
     ├── root_vol -> /    # Mounted at boot as root
     ├── home_vol -> /home # Mounted at boot as /home
-    ├── var_vol -> /var  # Mounted at boot as /var
-    ├── boot/            # Kernel and initramfs
-    └── efi/ -> [ESP]    # Symlink to ESP partition
+    └── var_vol -> /var  # Mounted at boot as /var
 ```
 
 **ESP (EFI System Partition) layout:**
 ```
+# ESP is a separate FAT32 partition (typically mounted at /efi or /boot/efi)
 /efi/                    # ESP mount point
 ├── EFI/
 │   └── systemd/        # systemd-boot files
-├── vmlinuz-linux       # Copied kernel
-├── initramfs-linux.img # Copied initramfs
+├── vmlinuz-linux       # Copied kernel from live environment
+├── initramfs-linux.img # Copied initramfs from live environment
 └── loader/             # Bootloader configuration
     ├── loader.conf
     └── entries/
-        └── backup.conf # Boot menu entry
+        └── backup.conf # Boot menu entry for backup environment
 ```
 
 ## How It Works

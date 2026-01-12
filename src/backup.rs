@@ -82,11 +82,6 @@ fn backup_single_source(
     // Create local snapshot and get parent snapshot (if any)
     let (snapshot_path, local_parent_snapshot) = create_local_snapshot(source)?;
 
-    // Determine parent snapshot for incremental backup
-    // Prefer local parent snapshot for incremental send, but also check target
-    // for compatibility with existing backup structure
-    let _target_parent_snapshot = find_parent_snapshot(source, target_config, target_mount)?;
-
     // For btrfs send -p, we need the parent snapshot on the source side
     // If we have a local parent snapshot, use it for incremental backup
     let parent_snapshot_for_send = local_parent_snapshot.as_deref();
@@ -347,38 +342,6 @@ fn find_previous_snapper_snapshot(
     }
 }
 
-/// Find parent snapshot for incremental backup
-fn find_parent_snapshot(
-    source: &SourceConfig,
-    target_config: &TargetConfig,
-    target_mount: &Path,
-) -> Result<Option<PathBuf>, BackupError> {
-    // Determine where snapshots are stored on target
-    let target_snapshot_dir = if target_config.enable_live_boot {
-        target_mount.join("@snapshots")
-    } else {
-        target_mount.to_path_buf()
-    };
-
-    // Look for latest snapshot of this source volume
-    let volume_name = get_volume_name_from_path(&source.path);
-
-    // Add '_vol' suffix to match README layout convention
-    let subvolume_name = if volume_name == "root" {
-        "root_vol".to_string()
-    } else {
-        format!("{}_vol", volume_name)
-    };
-
-    let volume_snapshot_dir = target_snapshot_dir.join(&subvolume_name);
-
-    if !volume_snapshot_dir.exists() {
-        return Ok(None);
-    }
-
-    btrfs::find_latest_snapshot(&volume_snapshot_dir)
-}
-
 /// Convert a filesystem path to a valid subvolume name
 fn get_volume_name_from_path(path: &Path) -> String {
     let components: Vec<String> = path
@@ -435,7 +398,7 @@ fn send_snapshot(
         snapshot_path,
         parent_snapshot,
         &target_parent_dir,
-        "backup",
+        "old",
         Some(&target_subvol_name),
     )?;
 
@@ -518,8 +481,8 @@ fn update_live_subvolume(
 
     let target_subvolume = live_root.join(volume_name);
 
-    // Use safe replacement with atomic renames
-    btrfs::replace_subvolume_safely(&target_subvolume, snapshot, "old")?;
+    // Create read-write snapshot and replace with atomic renames
+    btrfs::snapshot_and_replace_safely(&target_subvolume, snapshot, "old")?;
 
     log::info!("Updated subvolume {} with latest snapshot", volume_name);
     Ok(())

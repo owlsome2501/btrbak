@@ -133,8 +133,8 @@ pub fn update_live_root(
 ) -> Result<(), BackupError> {
     let live_root_path = btrfs_mount.join(live_root_subvolume);
 
-    // Use safe replacement with atomic renames
-    btrfs::replace_subvolume_safely(&live_root_path, snapshot_path, "old")?;
+    // Create read-write snapshot and replace with atomic renames
+    btrfs::snapshot_and_replace_safely(&live_root_path, snapshot_path, "old")?;
 
     Ok(())
 }

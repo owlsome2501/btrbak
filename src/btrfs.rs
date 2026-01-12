@@ -266,10 +266,10 @@ pub fn rename_subvolume(old_path: &Path, new_path: &Path) -> Result<(), BackupEr
     Ok(())
 }
 
-/// Safely replace a subvolume with a new one using atomic rename operations
-pub fn replace_subvolume_safely(
+/// Safely replace a subvolume by creating a read-write snapshot and using atomic rename operations
+pub fn snapshot_and_replace_safely(
     target_path: &Path,
-    new_source: &Path,
+    snapshot_source: &Path,
     backup_suffix: &str,
 ) -> Result<(), BackupError> {
     let parent_dir = target_path
@@ -285,8 +285,8 @@ pub fn replace_subvolume_safely(
     let new_path = parent_dir.join(format!("{}.new", target_name));
     let old_backup_path = parent_dir.join(format!("{}.{}", target_name, backup_suffix));
 
-    // Step 1: Create new snapshot with temporary name
-    create_snapshot_rw(new_source, &new_path)?;
+    // Step 1: Create new read-write snapshot with temporary name
+    create_snapshot_rw(snapshot_source, &new_path)?;
 
     // Step 2: If target exists, rename it to backup name
     let target_exists = target_path.exists();
@@ -376,6 +376,8 @@ pub fn send_and_replace_safely(
 }
 
 /// Safely replace a subvolume by moving another subvolume into its place
+/// Safely replace a subvolume by moving another subvolume into its place using atomic rename operations
+/// This is used when `source_path` is already a subvolume that can be directly moved/renamed
 pub fn move_and_replace_safely(
     target_path: &Path,
     source_path: &Path,

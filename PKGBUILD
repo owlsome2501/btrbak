@@ -1,5 +1,5 @@
 # Maintainer: Your Name <youremail@domain.com>
-pkgname=backup-btrfs
+pkgname=btrbak
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Incremental Btrfs backups with live boot environment and LUKS encryption support"
@@ -49,5 +49,5 @@ package() {
   done
 
   # Install configuration example
-  install -Dm0644 backup-btrfs.toml "$pkgdir/usr/share/doc/$pkgname/examples/backup-btrfs.toml" 2>/dev/null || true
+  install -Dm0644 btrbak.toml "$pkgdir/usr/share/doc/$pkgname/examples/btrbak.toml" 2>/dev/null || true
 }

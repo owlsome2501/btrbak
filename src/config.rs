@@ -42,7 +42,7 @@ fn default_snapshot_dir() -> PathBuf {
 }
 
 fn default_snapshot_name() -> String {
-    "backup_btrfs".to_string()
+    "btrbak".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -270,7 +270,7 @@ mod tests {
                 path: PathBuf::from("/test"),
                 snapshot_dir: PathBuf::from(".snapshots"),
                 use_snapper: false,
-                snapshot_name: "backup_btrfs".to_string(),
+                snapshot_name: "btrbak".to_string(),
                 snapper_config: None,
             }],
             target: TargetConfig {
@@ -285,7 +285,7 @@ mod tests {
         };
 
         assert_eq!(config.sources[0].snapshot_dir, PathBuf::from(".snapshots"));
-        assert_eq!(config.sources[0].snapshot_name, "backup_btrfs");
+        assert_eq!(config.sources[0].snapshot_name, "btrbak");
         assert!(!config.sources[0].use_snapper);
     }
 

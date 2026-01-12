@@ -1,10 +1,10 @@
-# backup-btrfs
+# btrbak
 
 A Rust tool for creating incremental Btrfs backups of multiple directories with optional LUKS encryption and live boot environment support.
 
 ## Overview
 
-`backup-btrfs` is a reliable backup solution for Btrfs filesystems that provides:
+`btrbak` is a reliable backup solution for Btrfs filesystems that provides:
 
 - **Multi-source backups** - Simultaneous backup of multiple directories with consistent naming
 - **Incremental transfers** - Efficient `btrfs send/receive` with changed data only
@@ -38,7 +38,7 @@ cargo build --release
 
 ### Basic Configuration
 
-Create a configuration file `backup-btrfs.toml`:
+Create a configuration file `btrbak.toml`:
 
 ```toml
 # Backup multiple source directories simultaneously
@@ -46,13 +46,13 @@ Create a configuration file `backup-btrfs.toml`:
 path = "/"                    # Root filesystem
 snapshot_dir = ".snapshots"   # Local snapshot directory
 use_snapper = false           # Use manual snapshot method
-snapshot_name = "backup_btrfs" # Name for manual snapshots
+snapshot_name = "btrbak" # Name for manual snapshots
 
 [[sources]]
 path = "/home"                # User home directories
 snapshot_dir = ".snapshots"
 use_snapper = false
-snapshot_name = "backup_btrfs"
+snapshot_name = "btrbak"
 
 # Optional: backup system directories
 # [[sources]]
@@ -75,23 +75,23 @@ remove_snapper_config = true  # Clean up snapper configs
 
 ```bash
 # Validate your configuration (dry-run check)
-backup-btrfs validate
+btrbak validate
 
 # Run a backup
-backup-btrfs backup
+btrbak backup
 
 # Run a dry-run backup (no changes made)
-backup-btrfs backup --dry-run
+btrbak backup --dry-run
 
 # List available snapshots
-backup-btrfs list-snapshots
+btrbak list-snapshots
 
 # Prepare live boot environment (initial setup)
-backup-btrfs prepare-live
+btrbak prepare-live
 ```
 
 **Configuration Validation Tips:**
-- Always run `backup-btrfs validate` before your first backup
+- Always run `btrbak validate` before your first backup
 - Use `--dry-run` to test backup operations without making changes
 - Validation checks source paths, target accessibility, and configuration consistency
 - Fix any validation errors before proceeding with actual backups
@@ -117,8 +117,8 @@ snapshot_dir = ".snapshots"
 use_snapper = false
 
 # Optional: name for manual snapshots (ignored if use_snapper = true)
-# Default: "backup_btrfs"
-snapshot_name = "backup_btrfs"
+# Default: "btrbak"
+snapshot_name = "btrbak"
 
 # Optional: snapper configuration name (required if use_snapper = true)
 # If not specified, inferred from source path basename
@@ -141,7 +141,7 @@ snapper_config = "var"  # Requires snapper config "var" to exist
    - `/home` → `home_vol`
    - `/var/log` → `var_log_vol`
 2. **Snapshot Storage**: Local snapshots are created in `source_path/snapshot_dir/`
-3. **Snapper Integration**: When enabled, uses snapper with "backup_btrfs" description
+3. **Snapper Integration**: When enabled, uses snapper with "btrbak" description
 4. **Incremental Backups**: Preserves previous snapshot for next incremental backup
 
 **Requirements:**
@@ -255,7 +255,7 @@ options = ["rw", "quiet", "rootflags=subvol=@/root_vol"]
 
 **Live Boot Setup Process:**
 
-1. **Initial Preparation**: Run `backup-btrfs prepare-live` once to:
+1. **Initial Preparation**: Run `btrbak prepare-live` once to:
    - Create `@` and `@snapshots` subvolumes on target
    - Initialize systemd-boot on the ESP
    - Create bootloader entries
@@ -315,7 +315,7 @@ remove_snapper_config = true
 
 ## File System Layout
 
-Understanding the Btrfs subvolume naming and organization is crucial for effective backup management. `backup-btrfs` uses consistent naming conventions across source and target systems.
+Understanding the Btrfs subvolume naming and organization is crucial for effective backup management. `btrbak` uses consistent naming conventions across source and target systems.
 
 ### Volume Naming Convention
 
@@ -338,14 +338,14 @@ Each source directory must have a location for local snapshots (default: `.snaps
 # Source filesystem (live system)
 /
 ├── .snapshots/           # Local snapshot directory (for /)
-│   └── backup_btrfs     # Read-only snapshot for backup
+│   └── btrbak     # Read-only snapshot for backup
 ├── home/
 │   ├── user/
 │   └── .snapshots/      # Local snapshot directory (for /home)
-│       └── backup_btrfs
+│       └── btrbak
 └── var/
     └── .snapshots/      # Local snapshot directory (for /var)
-        └── backup_btrfs
+        └── btrbak
 ```
 
 **With snapper integration:**
@@ -355,7 +355,7 @@ Each source directory must have a location for local snapshots (default: `.snaps
 │   ├── 1/
 │   │   └── snapshot     # Snapper snapshot #1
 │   ├── 2/
-│   │   └── snapshot     # Snapper snapshot #2 (backup_btrfs)
+│   │   └── snapshot     # Snapper snapshot #2 (btrbak)
 │   └── ...
 └── ...
 ```
@@ -403,7 +403,7 @@ The target layout depends on whether live boot environment is enabled.
 
 ## How It Works
 
-`backup-btrfs` performs parallel backup of multiple source directories with incremental transfers and optional live boot environment updates.
+`btrbak` performs parallel backup of multiple source directories with incremental transfers and optional live boot environment updates.
 
 ### Multi-Source Backup Process
 
@@ -426,17 +426,17 @@ for each source in configuration.sources:
 ```
 
 **3. Local Snapshot Creation**
-- **Manual method**: Creates read-only snapshot at `source/.snapshots/backup_btrfs`
-- **Snapper method**: Creates snapper snapshot with "backup_btrfs" description
+- **Manual method**: Creates read-only snapshot at `source/.snapshots/btrbak`
+- **Snapper method**: Creates snapper snapshot with "btrbak" description
 - Preserves previous snapshot as parent for next incremental backup
 
 **4. Incremental Data Transfer**
 ```
 # Full backup (first run):
-btrfs send /source/.snapshots/backup_btrfs | btrfs receive /target/volume_vol
+btrfs send /source/.snapshots/btrbak | btrfs receive /target/volume_vol
 
 # Incremental backup (subsequent runs):
-btrfs send -p /source/.snapshots/backup_btrfs_prev /source/.snapshots/backup_btrfs | btrfs receive /target/volume_vol
+btrfs send -p /source/.snapshots/btrbak_prev /source/.snapshots/btrbak | btrfs receive /target/volume_vol
 ```
 
 **5. Error Handling & Recovery**
@@ -465,8 +465,8 @@ The tool maintains consistent naming across source and target:
 
 ```
 # Source (live system)
-/                     -> snapshot at /.snapshots/backup_btrfs
-/home                 -> snapshot at /home/.snapshots/backup_btrfs
+/                     -> snapshot at /.snapshots/btrbak
+/home                 -> snapshot at /home/.snapshots/btrbak
 
 # Target (backup storage)
 @snapshots/root_vol   <- received snapshot of /
@@ -479,7 +479,7 @@ The tool maintains consistent naming across source and target:
 
 ## Architecture
 
-`backup-btrfs` is built with reliability and safety as primary concerns, using modern Rust patterns and careful error handling.
+`btrbak` is built with reliability and safety as primary concerns, using modern Rust patterns and careful error handling.
 
 ### Resource Management & Safety
 

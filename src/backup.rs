@@ -164,7 +164,7 @@ fn create_snapper_local_snapshot(
     _source_path: &Path,
     snapshot_dir: &Path,
 ) -> Result<(PathBuf, Option<PathBuf>), BackupError> {
-    // Use snapper to create snapshot with single type and backup_btrfs description
+    // Use snapper to create snapshot with single type and btrbak description
     let snapshot_name = create_snapper_snapshot(source)?;
     let snapshot_path = snapshot_dir.join(&snapshot_name);
 
@@ -178,7 +178,7 @@ fn create_snapper_local_snapshot(
 
     log::info!("Using snapper snapshot at: {}", snapshot_path.display());
 
-    // Find previous snapper snapshot with backup_btrfs tag for incremental backup
+    // Find previous snapper snapshot with btrbak tag for incremental backup
     let parent_snapshot_path = find_previous_snapper_snapshot(source, snapshot_dir)?;
 
     Ok((snapshot_path, parent_snapshot_path))
@@ -237,7 +237,7 @@ fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError>
             .to_string()
     };
 
-    // Run snapper create command with single type and backup_btrfs description
+    // Run snapper create command with single type and btrbak description
     let output = Command::new("snapper")
         .arg("-c")
         .arg(&config_name)
@@ -245,7 +245,7 @@ fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError>
         .arg("-t")
         .arg("single")
         .arg("-d")
-        .arg("backup_btrfs")
+        .arg("btrbak")
         .arg("--read-only")
         .output()?;
 
@@ -284,7 +284,7 @@ fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError>
     Ok(format!("{}/snapshot", snapshot_id))
 }
 
-/// Find previous snapper snapshot with backup_btrfs description
+/// Find previous snapper snapshot with btrbak description
 fn find_previous_snapper_snapshot(
     source: &SourceConfig,
     snapshot_dir: &Path,
@@ -336,9 +336,9 @@ fn find_previous_snapper_snapshot(
             let description = parts[1];
             let snapshot_type = parts[2];
 
-            // Look for single type snapshots with backup_btrfs description
+            // Look for single type snapshots with btrbak description
             if snapshot_type == "single"
-                && description == "backup_btrfs"
+                && description == "btrbak"
                 && let Ok(id) = number.parse::<u64>()
             {
                 backup_snapshots.push(id);
@@ -558,7 +558,7 @@ fn cleanup_old_snapshot(
     local_parent_snapshot: Option<PathBuf>,
 ) -> Result<(), BackupError> {
     if source.use_snapper {
-        // For snapper, clean up old backup_btrfs snapshots
+        // For snapper, clean up old btrbak snapshots
         cleanup_old_snapper_snapshots(source)?;
     } else if let Some(parent_path) = local_parent_snapshot {
         // For manual snapshots, delete the renamed parent snapshot
@@ -571,7 +571,7 @@ fn cleanup_old_snapshot(
     Ok(())
 }
 
-/// Clean up old snapper snapshots with backup_btrfs description
+/// Clean up old snapper snapshots with btrbak description
 fn cleanup_old_snapper_snapshots(source: &SourceConfig) -> Result<(), BackupError> {
     use std::process::Command;
 
@@ -618,9 +618,9 @@ fn cleanup_old_snapper_snapshots(source: &SourceConfig) -> Result<(), BackupErro
             let description = parts[1];
             let snapshot_type = parts[2];
 
-            // Look for single type snapshots with backup_btrfs description
+            // Look for single type snapshots with btrbak description
             if snapshot_type == "single"
-                && description == "backup_btrfs"
+                && description == "btrbak"
                 && let Ok(id) = number.parse::<u64>()
             {
                 backup_snapshots.push(id);

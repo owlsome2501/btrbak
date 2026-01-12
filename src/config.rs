@@ -1,8 +1,9 @@
 use anyhow;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::Command;
 use toml;
+
+use crate::btrfs;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -78,13 +79,33 @@ fn default_luks_mapping_name() -> String {
     "backup_target".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum TargetLocation {
     /// Already mounted filesystem path
     MountedPath(PathBuf),
     /// Device identifier (by UUID, LABEL, or path)
     Device(String),
+}
+
+impl<'de> serde::Deserialize<'de> for TargetLocation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        // Heuristic to determine if string is a device identifier
+        if s.starts_with("/dev/")
+            || s.starts_with("UUID=")
+            || s.starts_with("LABEL=")
+            || s.starts_with("PARTUUID=")
+        {
+            Ok(TargetLocation::Device(s))
+        } else {
+            // Assume it's a mounted path
+            Ok(TargetLocation::MountedPath(PathBuf::from(s)))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -177,13 +198,9 @@ impl Config {
             }
 
             // Check if source path is a btrfs subvolume
-            let output = Command::new("btrfs")
-                .arg("subvolume")
-                .arg("show")
-                .arg(&source.path)
-                .output();
-            match output {
-                Ok(output) if !output.status.success() => {
+            match btrfs::is_subvolume(&source.path) {
+                Ok(true) => {} // Success
+                Ok(false) => {
                     anyhow::bail!("Source path is not a btrfs subvolume: {:?}", source.path);
                 }
                 Err(e) => {
@@ -192,7 +209,14 @@ impl Config {
                         e
                     );
                 }
-                _ => {} // Success
+            }
+
+            // If using snapper, snapper_config must be set
+            if source.use_snapper && source.snapper_config.is_none() {
+                anyhow::bail!(
+                    "snapper_config must be set when use_snapper is true for source: {:?}",
+                    source.path
+                );
             }
         }
 
@@ -203,13 +227,9 @@ impl Config {
                     anyhow::bail!("Target mounted path does not exist: {:?}", p);
                 }
                 // Check if mounted path is a btrfs filesystem
-                let output = Command::new("btrfs")
-                    .arg("filesystem")
-                    .arg("show")
-                    .arg(p)
-                    .output();
-                match output {
-                    Ok(output) if !output.status.success() => {
+                match btrfs::is_btrfs_filesystem(p) {
+                    Ok(true) => {} // Success
+                    Ok(false) => {
                         anyhow::bail!("Target mounted path is not a btrfs filesystem: {:?}", p);
                     }
                     Err(e) => {
@@ -218,7 +238,6 @@ impl Config {
                             e
                         );
                     }
-                    _ => {} // Success
                 }
             }
             TargetLocation::Device(_) => {

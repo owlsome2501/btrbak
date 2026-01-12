@@ -413,3 +413,14 @@ pub fn move_and_replace_safely(
 
     Ok(())
 }
+
+/// Check if a path is a btrfs filesystem
+pub fn is_btrfs_filesystem(path: &Path) -> Result<bool, BackupError> {
+    let output = Command::new("btrfs")
+        .arg("filesystem")
+        .arg("show")
+        .arg(path)
+        .output()?;
+
+    Ok(output.status.success())
+}

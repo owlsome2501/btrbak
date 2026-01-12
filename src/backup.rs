@@ -224,29 +224,23 @@ fn create_manual_local_snapshot(
 fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError> {
     use std::process::Command;
 
-    // Determine snapper config name
-    let config_name = if let Some(ref name) = source.snapper_config {
-        name.clone()
-    } else {
-        // Infer from source path basename
-        source
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    };
+    // snapper_config must be set when use_snapper is true (validated in config)
+    let config_name = source
+        .snapper_config
+        .as_ref()
+        .expect("snapper_config must be set when use_snapper is true");
 
     // Run snapper create command with single type and btrbak description
     let output = Command::new("snapper")
         .arg("-c")
-        .arg(&config_name)
+        .arg(config_name)
         .arg("create")
         .arg("-t")
         .arg("single")
         .arg("-d")
         .arg("btrbak")
         .arg("--read-only")
+        .arg("--print-number")
         .output()?;
 
     if !output.status.success() {
@@ -257,26 +251,12 @@ fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError>
         )));
     }
 
-    // Parse output to get snapshot ID
+    // Parse output to get snapshot ID (--print-number outputs just the number)
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut snapshot_id = None;
-
-    for line in stdout.lines() {
-        if line.starts_with('#') {
-            continue; // Skip comment lines
-        }
-        if let Some(id_str) = line.split_whitespace().next()
-            && let Ok(id) = id_str.parse::<u64>()
-        {
-            snapshot_id = Some(id);
-            break;
-        }
-    }
-
-    let snapshot_id = snapshot_id.ok_or_else(|| {
+    let snapshot_id = stdout.trim().parse::<u64>().map_err(|e| {
         BackupError::Btrfs(format!(
-            "Failed to parse snapshot ID from snapper output:\n{}",
-            stdout
+            "Failed to parse snapshot ID from snapper output '{}': {}",
+            stdout, e
         ))
     })?;
 
@@ -291,18 +271,11 @@ fn find_previous_snapper_snapshot(
 ) -> Result<Option<PathBuf>, BackupError> {
     use std::process::Command;
 
-    // Determine snapper config name
-    let config_name = if let Some(ref name) = source.snapper_config {
-        name.clone()
-    } else {
-        // Infer from source path basename
-        source
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    };
+    // snapper_config must be set when use_snapper is true (validated in config)
+    let config_name = source
+        .snapper_config
+        .as_ref()
+        .expect("snapper_config must be set when use_snapper is true");
 
     // Get snapper list
     let output = Command::new("snapper")
@@ -575,18 +548,11 @@ fn cleanup_old_snapshot(
 fn cleanup_old_snapper_snapshots(source: &SourceConfig) -> Result<(), BackupError> {
     use std::process::Command;
 
-    // Determine snapper config name
-    let config_name = if let Some(ref name) = source.snapper_config {
-        name.clone()
-    } else {
-        // Infer from source path basename
-        source
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    };
+    // snapper_config must be set when use_snapper is true (validated in config)
+    let config_name = source
+        .snapper_config
+        .as_ref()
+        .expect("snapper_config must be set when use_snapper is true");
 
     // Get snapper list
     let output = Command::new("snapper")

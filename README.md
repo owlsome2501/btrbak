@@ -1,21 +1,199 @@
-## Usage
+# backup-btrfs
 
-1. Backup btrfs subvolume to other storage.
-2. Create a live boot environment based on backup.
+A Rust tool for creating incremental Btrfs backups with optional LUKS encryption and live boot environment support.
 
-## Source layout
+## Overview
 
-Requirement:
+`backup-btrfs` is a reliable backup solution for Btrfs filesystems that provides:
 
-- Source subvolume has a .snapshots dir or subvolume for local snapshot.
-    - If use `snapper`, `backup_btrfs` will create a snapshot subvolume by snapper at `.snapshots/[id]/snapshot`.
-    - If not, `backup_btrfs` will create a snapshot subvolume at `.snapshots/backup_btrfs`.
+- **Incremental backups** using `btrfs send/receive` for efficient storage
+- **Live boot environments** that can be booted directly from backup storage
+- **LUKS encryption** support for secure offsite backups
+- **Snapper integration** for coordinated snapshot management
+- **Resource-safe operations** using RAII patterns for automatic cleanup
 
-With local snapshot, `backup_btrfs` can use `btrfs send -p local_snap_old local_snap_new | btrfs receive ...` to do
-incremental backup.
+## Key Features
 
-Example(simple):
+- 🔄 **Efficient incremental backups** - Only transfers changed data between snapshots
+- 🔒 **Optional encryption** - LUKS support for secure backup storage
+- 🚀 **Live boot environments** - Create bootable backup environments
+- 🛡️ **Safe resource management** - Automatic cleanup of mounts and temporary files
+- ⚙️ **Flexible configuration** - TOML-based configuration with sensible defaults
+- 🔌 **Snapper integration** - Works with existing snapper configurations
 
+## Quick Start
+
+### Installation
+
+```bash
+# Install from source
+cargo install --path .
+
+# Or build locally
+cargo build --release
+```
+
+### Basic Configuration
+
+Create a configuration file `backup-btrfs.toml`:
+
+```toml
+# Single source configuration
+[[sources]]
+path = "/"
+snapshot_dir = ".snapshots"
+use_snapper = false
+snapshot_name = "backup_btrfs"
+
+# Multiple sources configuration example:
+# [[sources]]
+# path = "/home"
+# snapshot_dir = ".snapshots"
+# use_snapper = false
+# snapshot_name = "backup_btrfs"
+# 
+# [[sources]]
+# path = "/var"
+# snapshot_dir = ".snapshots"
+# use_snapper = true
+# snapper_config = "var"
+
+[target]
+location = "/mnt/backup"
+enable_live_boot = false
+
+[hooks]
+copy_kernel = true
+regenerate_fstab = true
+remove_snapper_config = true
+```
+
+### Running Backups
+
+```bash
+# Validate your configuration
+backup-btrfs validate
+
+# Run a backup
+backup-btrfs backup
+
+# List available snapshots
+backup-btrfs list-snapshots
+
+# Prepare live boot environment (if enabled)
+backup-btrfs prepare-live
+```
+
+## Configuration Guide
+
+### Source Configuration
+
+The source configuration defines what you're backing up. You can configure multiple source directories to backup simultaneously:
+
+```toml
+# Single source configuration
+[[sources]]
+path = "/"                    # Path to the Btrfs subvolume to backup
+snapshot_dir = ".snapshots"   # Directory for local snapshots (relative to source)
+use_snapper = false           # Use snapper for snapshot management
+snapshot_name = "backup_btrfs" # Name for manual snapshots
+snapper_config = "root"       # Optional: snapper config name
+
+# Multiple sources configuration (add more [[sources]] sections)
+# [[sources]]
+# path = "/home"
+# snapshot_dir = ".snapshots"
+# use_snapper = false
+# snapshot_name = "backup_btrfs"
+# 
+# [[sources]]
+# path = "/var"
+# snapshot_dir = ".snapshots"
+# use_snapper = true
+# snapper_config = "var"
+```
+
+**Requirements:**
+- Source must be a Btrfs subvolume
+- The snapshot directory must exist or be creatable
+- For snapper integration, snapper must be properly configured
+
+### Target Configuration
+
+The target configuration defines where backups are stored:
+
+```toml
+[target]
+location = "/mnt/backup"     # Either a mounted path or device identifier
+enable_live_boot = false     # Enable live boot environment
+snapshot_subvolume = "@snapshots"  # Optional: subvolume for snapshots
+live_root_subvolume = "@"    # Optional: subvolume for live boot root
+```
+
+**Target options:**
+- `MountedPath("/path")` - Use an already mounted filesystem
+- `Device("/dev/sdX")` - Mount a device automatically (supports UUID/LABEL paths)
+
+### Live Boot Environment
+
+Create a bootable environment from your backups:
+
+```toml
+[target]
+location = "/mnt/backup"
+enable_live_boot = true
+
+[live_boot]
+esp_path = "/mnt/efi"        # EFI System Partition path
+bootloader = "SystemdBoot"   # Currently only systemd-boot supported
+
+[live_boot.boot_entry]
+title = "Backup Environment"
+kernel = "/boot/vmlinuz-linux"
+initramfs = "/boot/initramfs-linux.img"
+options = ["rw", "quiet"]
+```
+
+### Encryption Support
+
+Secure your backups with LUKS encryption:
+
+```toml
+[target]
+location = "/dev/disk/by-uuid/12345678-1234-1234-1234-123456789012"
+
+[target.encryption]
+keyfile = "/path/to/luks/keyfile"        # Optional: keyfile path
+passphrase_env = "BACKUP_PASSPHRASE"     # Optional: environment variable
+mapping_name = "backup_target"           # Optional: LUKS mapping name
+```
+
+**Security Notes:**
+- Store keyfiles with restricted permissions (e.g., `chmod 600`)
+- Use environment variables from secure sources (secrets managers, etc.)
+- Never commit credentials to version control
+
+### Hooks
+
+Post-backup automation:
+
+```toml
+[hooks]
+copy_kernel = true           # Copy kernel/initramfs to ESP
+regenerate_fstab = true      # Update fstab in live environment
+remove_snapper_config = true # Prevent snapper from modifying live environment
+```
+
+## File System Layout
+
+Understanding the Btrfs subvolume layout is essential for effective backup management.
+
+### Source Layout Requirements
+
+The source filesystem must have a location for local snapshots.
+By default, this is a `.snapshots` directory or subvolume within the source being backed up.
+
+**Simple layout example:**
 ```
 (btrfs top-level subvolume)
 ├── root_vol                ->  /
@@ -26,8 +204,7 @@ Example(simple):
 └── other_snapshot_vol      ->  /any/mount/point/other/.snapshots
 ```
 
-Example(full):
-
+**Advanced layout with separate snapshot subvolume:**
 ```
 (esp)                  ->  /efi
 
@@ -43,18 +220,11 @@ Example(full):
     └── swap_vol       ->  /swap
 ```
 
+### Target Layout
 
-## Target layout
+The target layout varies based on whether live boot is enabled:
 
-Target filesystem or subvolume is only a simple subvolume.
-
-If enable live boot environment, target filesystem has two subvolume `@` and `@snapshots`.
-
-- `@` for live boot environment.
-- `@snapshots` for backup target (i.e. the target subvolume when live boot environment not enabled).
-
-Example(without live boot):
-
+**Without live boot environment:**
 ```
 (target subvolume)
 ├── root_vol
@@ -62,44 +232,94 @@ Example(without live boot):
 └── other_vol
 ```
 
-Example(with live boot):
-
+**With live boot environment:**
 ```
 (esp)                  ->  /efi
 
 (btrfs top-level subvolume)
-├── @snapshots
+├── @snapshots         # Backup storage subvolume
 │   ├── root_vol
 │   └── home_user_vol
-└── @
+└── @                  # Live boot environment
     ├── root_vol       ->  /
     └── home_user_vol  ->  /home/user
 ```
 
-## Live boot environment
+## How It Works
 
-### Prepare
+### Incremental Backup Process
 
-If with live boot environment, external storage must be prepared.
-`backup_btrfs` provides a command to do those things:
+1. **Local snapshot creation** - Creates a snapshot of the source subvolume
+2. **Parent identification** - Finds the previous snapshot for incremental transfer
+3. **Data transfer** - Uses `btrfs send -p <parent> <snapshot> | btrfs receive`
+4. **Live environment update** - Updates the live boot environment if enabled
+5. **Cleanup** - Removes old local snapshots while preserving the latest for next backup
 
-1. Check mounted filesystems (path provided by arguments).
-    1. target btrfs filesystem (top-level subvolume mounted).
-    2. esp of target storage (optional).
-2. Create subvolums under target btrfs filesystem.
-3. Init loader (optional).
-    1. Install systemd-boot to esp of target storage.
-    2. Generate a loader entry for systemd-boot.
+### Live Boot Environment Management
 
-You can edit the loader manually.
+**Preparation phase:**
+- Creates `@` and `@snapshots` subvolumes on target
+- Initializes systemd-boot on the ESP (if provided)
+- Creates boot loader entries
 
-### Post backup
+**Post-backup updates:**
+- Replaces the live environment with the new snapshot
+- Runs configured hooks (kernel copy, fstab regeneration, etc.)
+- Maintains a bootable environment that mirrors your latest backup
 
-After backup, subvolume under `@` is replace by a snapshot of new backup.
-So, live boot environment will be always updated.
+## Architecture
 
-And some hook will run on live boot environment:
+`backup-btrfs` uses modern Rust patterns for reliable operation:
 
-1. Copy kernel and initramfs from `/boot` to `/efi`.
-2. Regenerate `fstab` if new subvolume was added.
-3. Remove any snapper config to prevent snapper creating snapshots on live boot environment.
+### Resource Management
+- **RAII patterns** - `MountGuard` automatically manages mount points and LUKS mappings
+- **Automatic cleanup** - Temporary directories and encrypted mappings are cleaned up on drop
+- **Error safety** - Operations are atomic where possible, with proper rollback on failure
+
+### Core Components
+- **Configuration parsing** - Type-safe TOML configuration with validation
+- **Device management** - Unified handling of mounted paths and raw devices
+- **Encryption support** - Optional LUKS integration with keyfile or environment variable auth
+- **Hook system** - Extensible post-backup operations
+
+## Testing
+
+Run the comprehensive test suite:
+
+```bash
+# Run all tests
+cargo test
+
+# Run library tests only
+cargo test --lib
+
+# Build with all warnings
+cargo clippy -- -D warnings
+```
+
+**Test coverage includes:**
+- Configuration parsing and validation
+- Error type conversions and display
+- Default value correctness
+- File I/O operations with temporary files
+
+Integration tests requiring external commands (btrfs, cryptsetup, etc.) are not included to avoid impacting real systems during development.
+
+## Security Considerations
+
+1. **Encryption keys** - Store LUKS keyfiles with minimal permissions and consider using hardware security modules for production use
+2. **Environment variables** - Use secure environment variable management (e.g., systemd service files with `LoadCredential`)
+3. **Backup storage** - Ensure backup media is physically secure when containing sensitive data
+4. **Network security** - When backing up over networks, use encrypted transport (SSH, VPN, etc.)
+
+## Contributing
+
+1. Ensure all tests pass: `cargo test`
+2. Check code quality: `cargo clippy -- -D warnings`
+3. Maintain consistent formatting
+4. Add tests for new functionality
+5. Update documentation for any configuration changes
+
+## License
+
+This project is available under standard open-source licenses. See the LICENSE file for details.

@@ -1,0 +1,761 @@
+use crate::BackupError;
+use crate::btrfs;
+use crate::config::{Config, SourceConfig, TargetConfig, TargetLocation};
+use crate::device;
+use crate::hooks;
+use crate::liveboot;
+use log;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Main backup procedure
+pub fn run_backup(config_path: &PathBuf, dry_run: bool) -> Result<(), BackupError> {
+    let config = Config::from_file(config_path)?;
+    config.validate()?;
+
+    log::info!("Starting backup with configuration:");
+    log::info!("  Sources:");
+    for source in &config.sources {
+        log::info!("    - {}", source.path.display());
+    }
+    log::info!("  Target: {:?}", config.target.location);
+
+    if dry_run {
+        log::info!("Dry run mode - no changes will be made");
+        return Ok(());
+    }
+
+    // Step 1: Ensure target is mounted
+    let mount_guard = mount_target(&config)?;
+    let target_mount = mount_guard.mount_point();
+
+    // Collect errors from each source backup
+    let mut errors = Vec::new();
+
+    // Backup each source
+    for source in &config.sources {
+        log::info!("Backing up source: {}", source.path.display());
+
+        match backup_single_source(source, &config.target, target_mount) {
+            Ok(()) => {
+                log::info!("Successfully backed up source: {}", source.path.display());
+            }
+            Err(e) => {
+                log::error!("Failed to backup source {}: {}", source.path.display(), e);
+                errors.push((source.path.clone(), e));
+            }
+        }
+    }
+
+    // Step 5: Update live boot environment if enabled
+    if config.target.enable_live_boot && errors.is_empty() {
+        // Only update live boot environment if all backups succeeded
+        if let Err(e) = update_live_environment(&config, target_mount) {
+            log::error!("Failed to update live boot environment: {}", e);
+            errors.push((PathBuf::from("live_boot"), e));
+        }
+    }
+
+    // Report any errors that occurred
+    if !errors.is_empty() {
+        let error_msg = errors
+            .iter()
+            .map(|(path, err)| format!("{}: {}", path.display(), err))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(BackupError::Btrfs(format!(
+            "Backup completed with errors: {}",
+            error_msg
+        )));
+    }
+
+    log::info!("Backup completed successfully");
+    Ok(())
+}
+
+/// Backup a single source volume
+fn backup_single_source(
+    source: &SourceConfig,
+    target_config: &TargetConfig,
+    target_mount: &Path,
+) -> Result<(), BackupError> {
+    // Create local snapshot and get parent snapshot (if any)
+    let (snapshot_path, local_parent_snapshot) = create_local_snapshot(source)?;
+
+    // Determine parent snapshot for incremental backup
+    // Prefer local parent snapshot for incremental send, but also check target
+    // for compatibility with existing backup structure
+    let _target_parent_snapshot = find_parent_snapshot(source, target_config, target_mount)?;
+
+    // For btrfs send -p, we need the parent snapshot on the source side
+    // If we have a local parent snapshot, use it for incremental backup
+    let parent_snapshot_for_send = local_parent_snapshot.as_deref();
+
+    // Send snapshot to target
+    send_snapshot(
+        source,
+        target_config,
+        &snapshot_path,
+        parent_snapshot_for_send,
+        target_mount,
+    )?;
+
+    // Clean up old local snapshot
+    cleanup_old_snapshot(source, local_parent_snapshot)?;
+
+    Ok(())
+}
+
+/// Mount target device if needed
+/// Returns a MountGuard that will unmount the device when dropped
+fn mount_target(config: &Config) -> Result<device::MountGuard, BackupError> {
+    match &config.target.location {
+        TargetLocation::MountedPath(path) => {
+            // Already mounted, just verify it's accessible
+            if !path.exists() {
+                return Err(BackupError::Mount(format!(
+                    "Target mounted path does not exist: {:?}",
+                    path
+                )));
+            }
+            Ok(device::MountGuard::for_mounted_path(path))
+        }
+        TargetLocation::Device(device) => {
+            // Check if encryption is configured
+            if let Some(encryption) = &config.target.encryption {
+                device::MountGuard::new_encrypted(device, encryption)
+            } else {
+                device::MountGuard::new(device)
+            }
+        }
+    }
+}
+
+/// Create a local snapshot of the source subvolume
+/// Returns (new_snapshot_path, parent_snapshot_path) where parent_snapshot_path is Some
+/// if there was a previous local snapshot that can be used for incremental backup
+fn create_local_snapshot(source: &SourceConfig) -> Result<(PathBuf, Option<PathBuf>), BackupError> {
+    let source_path = &source.path;
+
+    if !btrfs::is_subvolume(source_path)? {
+        return Err(BackupError::Btrfs(format!(
+            "Source path is not a btrfs subvolume: {:?}",
+            source_path
+        )));
+    }
+
+    // Determine snapshot directory
+    let snapshot_dir = source_path.join(&source.snapshot_dir);
+    if !snapshot_dir.exists() {
+        fs::create_dir_all(&snapshot_dir)?;
+    }
+
+    // Dispatch to appropriate handler based on snapshot method
+    if source.use_snapper {
+        create_snapper_local_snapshot(source, source_path, &snapshot_dir)
+    } else {
+        create_manual_local_snapshot(source, source_path, &snapshot_dir)
+    }
+}
+
+/// Create local snapshot using snapper
+fn create_snapper_local_snapshot(
+    source: &SourceConfig,
+    _source_path: &Path,
+    snapshot_dir: &Path,
+) -> Result<(PathBuf, Option<PathBuf>), BackupError> {
+    // Use snapper to create snapshot with single type and backup_btrfs description
+    let snapshot_name = create_snapper_snapshot(source)?;
+    let snapshot_path = snapshot_dir.join(&snapshot_name);
+
+    // Verify snapper created the snapshot and it's a valid subvolume
+    if !btrfs::is_subvolume(&snapshot_path)? {
+        return Err(BackupError::Btrfs(format!(
+            "Snapper snapshot not found or not a subvolume: {}",
+            snapshot_path.display()
+        )));
+    }
+
+    log::info!("Using snapper snapshot at: {}", snapshot_path.display());
+
+    // Find previous snapper snapshot with backup_btrfs tag for incremental backup
+    let parent_snapshot_path = find_previous_snapper_snapshot(source, snapshot_dir)?;
+
+    Ok((snapshot_path, parent_snapshot_path))
+}
+
+/// Create local snapshot manually (without snapper)
+fn create_manual_local_snapshot(
+    source: &SourceConfig,
+    source_path: &Path,
+    snapshot_dir: &Path,
+) -> Result<(PathBuf, Option<PathBuf>), BackupError> {
+    let snapshot_name = &source.snapshot_name;
+    let snapshot_path = snapshot_dir.join(snapshot_name);
+
+    // Prepare previous snapshot path for preserving old snapshot
+    let prev_name = format!("{}_prev", snapshot_name);
+    let prev_path = snapshot_dir.join(&prev_name);
+
+    // Clean up old _prev snapshot if it exists
+    if prev_path.exists() && btrfs::is_subvolume(&prev_path)? {
+        log::info!("Cleaning up old previous snapshot: {}", prev_path.display());
+        btrfs::delete_subvolume(&prev_path)?;
+    }
+
+    // Check if there's an existing snapshot to preserve as parent
+    let parent_snapshot_path = if snapshot_path.exists() && btrfs::is_subvolume(&snapshot_path)? {
+        // Rename existing snapshot to preserve it as parent for incremental backup
+        log::info!("Renaming existing snapshot to: {}", prev_path.display());
+        btrfs::rename_subvolume(&snapshot_path, &prev_path)?;
+        Some(prev_path)
+    } else {
+        None
+    };
+
+    // Create new read-only snapshot
+    btrfs::create_snapshot(source_path, &snapshot_path)?;
+    log::info!("Created local snapshot at: {}", snapshot_path.display());
+
+    Ok((snapshot_path, parent_snapshot_path))
+}
+
+/// Create snapshot using snapper
+fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError> {
+    use std::process::Command;
+
+    // Determine snapper config name
+    let config_name = if let Some(ref name) = source.snapper_config {
+        name.clone()
+    } else {
+        // Infer from source path basename
+        source
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    };
+
+    // Run snapper create command with single type and backup_btrfs description
+    let output = Command::new("snapper")
+        .arg("-c")
+        .arg(&config_name)
+        .arg("create")
+        .arg("-t")
+        .arg("single")
+        .arg("-d")
+        .arg("backup_btrfs")
+        .arg("--read-only")
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BackupError::Btrfs(format!(
+            "Failed to create snapper snapshot for config '{}': {}",
+            config_name, stderr
+        )));
+    }
+
+    // Parse output to get snapshot ID
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut snapshot_id = None;
+
+    for line in stdout.lines() {
+        if line.starts_with('#') {
+            continue; // Skip comment lines
+        }
+        if let Some(id_str) = line.split_whitespace().next()
+            && let Ok(id) = id_str.parse::<u64>()
+        {
+            snapshot_id = Some(id);
+            break;
+        }
+    }
+
+    let snapshot_id = snapshot_id.ok_or_else(|| {
+        BackupError::Btrfs(format!(
+            "Failed to parse snapshot ID from snapper output:\n{}",
+            stdout
+        ))
+    })?;
+
+    // Snapper creates snapshot at .snapshots/<id>/snapshot
+    Ok(format!("{}/snapshot", snapshot_id))
+}
+
+/// Find previous snapper snapshot with backup_btrfs description
+fn find_previous_snapper_snapshot(
+    source: &SourceConfig,
+    snapshot_dir: &Path,
+) -> Result<Option<PathBuf>, BackupError> {
+    use std::process::Command;
+
+    // Determine snapper config name
+    let config_name = if let Some(ref name) = source.snapper_config {
+        name.clone()
+    } else {
+        // Infer from source path basename
+        source
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    };
+
+    // Get snapper list
+    let output = Command::new("snapper")
+        .arg("-c")
+        .arg(&config_name)
+        .arg("list")
+        .arg("--columns")
+        .arg("number,description,type")
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BackupError::Btrfs(format!(
+            "Failed to list snapper snapshots for config '{}': {}",
+            config_name, stderr
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut backup_snapshots = Vec::new();
+
+    // Parse output lines
+    for line in stdout.lines() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let number = parts[0];
+            let description = parts[1];
+            let snapshot_type = parts[2];
+
+            // Look for single type snapshots with backup_btrfs description
+            if snapshot_type == "single"
+                && description == "backup_btrfs"
+                && let Ok(id) = number.parse::<u64>()
+            {
+                backup_snapshots.push(id);
+            }
+        }
+    }
+
+    // Sort descending (newest first)
+    backup_snapshots.sort_by(|a, b| b.cmp(a));
+
+    // We need at least 2 snapshots to have a parent
+    if backup_snapshots.len() >= 2 {
+        // The first one is the one we just created, the second one is the parent
+        let parent_id = backup_snapshots[1];
+        let parent_path = snapshot_dir.join(format!("{}/snapshot", parent_id));
+
+        if btrfs::is_subvolume(&parent_path)? {
+            log::info!(
+                "Found previous snapper snapshot at: {}",
+                parent_path.display()
+            );
+            Ok(Some(parent_path))
+        } else {
+            log::warn!(
+                "Previous snapper snapshot path is not a subvolume: {}",
+                parent_path.display()
+            );
+            Ok(None)
+        }
+    } else {
+        log::info!("No previous snapper snapshot found for incremental backup");
+        Ok(None)
+    }
+}
+
+/// Find parent snapshot for incremental backup
+fn find_parent_snapshot(
+    source: &SourceConfig,
+    target_config: &TargetConfig,
+    target_mount: &Path,
+) -> Result<Option<PathBuf>, BackupError> {
+    // Determine where snapshots are stored on target
+    let target_snapshot_dir = if target_config.enable_live_boot {
+        target_mount.join("@snapshots")
+    } else {
+        target_mount.to_path_buf()
+    };
+
+    // Look for latest snapshot of this source volume
+    let volume_name = get_volume_name_from_path(&source.path);
+
+    // Add '_vol' suffix to match README layout convention
+    let subvolume_name = if volume_name == "root" {
+        "root_vol".to_string()
+    } else {
+        format!("{}_vol", volume_name)
+    };
+
+    let volume_snapshot_dir = target_snapshot_dir.join(&subvolume_name);
+
+    if !volume_snapshot_dir.exists() {
+        return Ok(None);
+    }
+
+    btrfs::find_latest_snapshot(&volume_snapshot_dir)
+}
+
+/// Convert a filesystem path to a valid subvolume name
+fn get_volume_name_from_path(path: &Path) -> String {
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            if s.is_empty() || s == "." || s == "/" {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .collect();
+
+    if components.is_empty() {
+        "root".to_string()
+    } else {
+        components.join("_")
+    }
+}
+
+/// Send snapshot to target
+fn send_snapshot(
+    source: &SourceConfig,
+    target_config: &TargetConfig,
+    snapshot_path: &Path,
+    parent_snapshot: Option<&Path>,
+    target_mount: &Path,
+) -> Result<(), BackupError> {
+    // Determine target volume name and parent directory
+    let volume_name = get_volume_name_from_path(&source.path);
+
+    // Add '_vol' suffix to match README layout convention
+    let subvolume_name = if volume_name == "root" {
+        "root_vol".to_string()
+    } else {
+        format!("{}_vol", volume_name)
+    };
+
+    let (target_parent_dir, target_subvol_name) = if target_config.enable_live_boot {
+        let parent = target_mount.join("@snapshots");
+        (parent, subvolume_name)
+    } else {
+        (target_mount.to_path_buf(), subvolume_name)
+    };
+
+    // Create parent directory if it doesn't exist
+    if !target_parent_dir.exists() {
+        fs::create_dir_all(&target_parent_dir)?;
+    }
+
+    // Send the snapshot safely with atomic replacement
+    btrfs::send_and_replace_safely(
+        snapshot_path,
+        parent_snapshot,
+        &target_parent_dir,
+        "backup",
+        Some(&target_subvol_name),
+    )?;
+
+    log::info!(
+        "Sent snapshot to: {}/{}",
+        target_parent_dir.display(),
+        target_subvol_name
+    );
+    Ok(())
+}
+
+/// Update live boot environment
+fn update_live_environment(config: &Config, target_mount: &Path) -> Result<(), BackupError> {
+    if let Some(live_boot_config) = &config.live_boot {
+        let live_root_subvolume = config.target.live_root_subvolume.as_deref().unwrap_or("@");
+        let live_root_path = target_mount.join(live_root_subvolume);
+
+        log::info!(
+            "Updating live boot environment for {} sources",
+            config.sources.len()
+        );
+
+        // Update each source in live boot environment
+        for source in &config.sources {
+            let volume_name = get_volume_name_from_path(&source.path);
+
+            // Determine subvolume name with '_vol' suffix
+            let subvolume_name = if volume_name == "root" {
+                "root_vol".to_string()
+            } else {
+                format!("{}_vol", volume_name)
+            };
+
+            log::info!(
+                "Processing source: {} (volume: {}, subvolume: {})",
+                source.path.display(),
+                volume_name,
+                subvolume_name
+            );
+
+            let snapshot_dir = target_mount.join("@snapshots").join(&subvolume_name);
+            let latest_snapshot = btrfs::find_latest_snapshot(&snapshot_dir)?;
+
+            if let Some(snapshot) = latest_snapshot {
+                log::info!(
+                    "Updating subvolume {} in live boot environment",
+                    subvolume_name
+                );
+                update_live_subvolume(&live_root_path, &snapshot, &subvolume_name)?;
+
+                log::info!(
+                    "Live boot environment updated for {}",
+                    source.path.display()
+                );
+            }
+        }
+
+        // Run hooks after all sources are updated
+        hooks::run_hooks(
+            &live_root_path,
+            &live_boot_config.esp_path,
+            &config.hooks,
+            &live_boot_config.boot_entry,
+            config,
+        )?;
+
+        log::info!("Live boot environment update complete");
+    }
+
+    Ok(())
+}
+
+/// Update a subvolume in live boot environment with latest snapshot
+fn update_live_subvolume(
+    live_root: &Path,
+    snapshot: &Path,
+    volume_name: &str,
+) -> Result<(), BackupError> {
+    use crate::btrfs;
+
+    let target_subvolume = live_root.join(volume_name);
+
+    // Use safe replacement with atomic renames
+    btrfs::replace_subvolume_safely(&target_subvolume, snapshot, "old")?;
+
+    log::info!("Updated subvolume {} with latest snapshot", volume_name);
+    Ok(())
+}
+
+/// Clean up old local snapshot after successful backup
+fn cleanup_old_snapshot(
+    source: &SourceConfig,
+    local_parent_snapshot: Option<PathBuf>,
+) -> Result<(), BackupError> {
+    if source.use_snapper {
+        // For snapper, clean up old backup_btrfs snapshots
+        cleanup_old_snapper_snapshots(source)?;
+    } else if let Some(parent_path) = local_parent_snapshot {
+        // For manual snapshots, delete the renamed parent snapshot
+        if parent_path.exists() && btrfs::is_subvolume(&parent_path)? {
+            log::info!("Deleting old local snapshot: {}", parent_path.display());
+            btrfs::delete_subvolume(&parent_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Clean up old snapper snapshots with backup_btrfs description
+fn cleanup_old_snapper_snapshots(source: &SourceConfig) -> Result<(), BackupError> {
+    use std::process::Command;
+
+    // Determine snapper config name
+    let config_name = if let Some(ref name) = source.snapper_config {
+        name.clone()
+    } else {
+        // Infer from source path basename
+        source
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    };
+
+    // Get snapper list
+    let output = Command::new("snapper")
+        .arg("-c")
+        .arg(&config_name)
+        .arg("list")
+        .arg("--columns")
+        .arg("number,description,type")
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!("Failed to list snapper snapshots for cleanup: {}", stderr);
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut backup_snapshots = Vec::new();
+
+    // Parse output lines
+    for line in stdout.lines() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let number = parts[0];
+            let description = parts[1];
+            let snapshot_type = parts[2];
+
+            // Look for single type snapshots with backup_btrfs description
+            if snapshot_type == "single"
+                && description == "backup_btrfs"
+                && let Ok(id) = number.parse::<u64>()
+            {
+                backup_snapshots.push(id);
+            }
+        }
+    }
+
+    // Sort descending (newest first)
+    backup_snapshots.sort_by(|a, b| b.cmp(a));
+
+    // Keep the latest 2 snapshots (current and previous for next incremental)
+    // Delete older ones
+    for &snapshot_id in backup_snapshots.iter().skip(2) {
+        log::info!("Deleting old snapper snapshot #{}", snapshot_id);
+
+        let output = Command::new("snapper")
+            .arg("-c")
+            .arg(&config_name)
+            .arg("delete")
+            .arg(snapshot_id.to_string())
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::warn!(
+                "Failed to delete snapper snapshot #{}: {}",
+                snapshot_id,
+                stderr
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Prepare live boot environment (initial setup)
+pub fn prepare_live_environment(config_path: &PathBuf) -> Result<(), BackupError> {
+    let config = Config::from_file(config_path)?;
+    config.validate()?;
+
+    if !config.target.enable_live_boot {
+        return Err(BackupError::Config(anyhow::anyhow!(
+            "Live boot not enabled in configuration"
+        )));
+    }
+
+    let live_boot_config = config
+        .live_boot
+        .as_ref()
+        .ok_or_else(|| BackupError::Config(anyhow::anyhow!("Live boot configuration missing")))?;
+
+    // Mount target if needed
+    let mount_guard = mount_target(&config)?;
+
+    // Prepare live boot environment
+    let live_root_subvolume = config.target.live_root_subvolume.as_deref().unwrap_or("@");
+    let snapshot_subvolume = config
+        .target
+        .snapshot_subvolume
+        .as_deref()
+        .unwrap_or("@snapshots");
+    liveboot::prepare_live_boot(
+        mount_guard.mount_point(),
+        live_boot_config,
+        live_root_subvolume,
+        snapshot_subvolume,
+    )?;
+
+    log::info!("Live boot environment prepared successfully");
+    Ok(())
+}
+
+/// List available snapshots
+pub fn list_snapshots(config_path: &PathBuf) -> Result<(), BackupError> {
+    let config = Config::from_file(config_path)?;
+    config.validate()?;
+
+    // Mount target if needed
+    let mount_guard = mount_target(&config)?;
+
+    // Determine snapshot directory
+    let snapshot_dir = if config.target.enable_live_boot {
+        mount_guard.mount_point().join("@snapshots")
+    } else {
+        mount_guard.mount_point().to_path_buf()
+    };
+
+    // List snapshots for each source
+    for source in &config.sources {
+        let volume_name = get_volume_name_from_path(&source.path);
+
+        // Add '_vol' suffix to match README layout convention
+        let subvolume_name = if volume_name == "root" {
+            "root_vol".to_string()
+        } else {
+            format!("{}_vol", volume_name)
+        };
+
+        let volume_snapshot_dir = snapshot_dir.join(&subvolume_name);
+
+        if !volume_snapshot_dir.exists() {
+            log::info!(
+                "No snapshots found for {} (subvolume: {})",
+                source.path.display(),
+                subvolume_name
+            );
+            continue;
+        }
+
+        log::info!(
+            "Snapshots for {} (subvolume: {}):",
+            source.path.display(),
+            subvolume_name
+        );
+        log::info!("{:-<50}", "");
+
+        let entries = fs::read_dir(&volume_snapshot_dir)?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+
+            if btrfs::is_subvolume(&path)? {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+
+                let metadata = fs::metadata(&path)?;
+                let modified = metadata
+                    .modified()
+                    .map(|t| format!("{:?}", t))
+                    .unwrap_or_else(|_| "unknown".to_string());
+
+                log::info!("  {} (modified: {})", name, modified);
+            }
+        }
+        log::info!(""); // Blank line between sources
+    }
+
+    Ok(())
+}

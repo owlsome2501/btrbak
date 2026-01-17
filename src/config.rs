@@ -7,6 +7,8 @@ use crate::btrfs;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    /// Configuration name (used to distinguish between different external storage targets)
+    pub name: String,
     /// Source subvolume configurations
     #[serde(alias = "source")]
     pub sources: Vec<SourceConfig>,
@@ -185,6 +187,11 @@ impl Config {
 
     /// Validate configuration consistency
     pub fn validate(&self) -> anyhow::Result<()> {
+        // Ensure configuration name is provided and not empty
+        if self.name.trim().is_empty() {
+            anyhow::bail!("Configuration name must be non-empty");
+        }
+
         // Ensure we have at least one source
         if self.sources.is_empty() {
             anyhow::bail!("No source configurations provided");
@@ -285,6 +292,7 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = Config {
+            name: "test".to_string(),
             sources: vec![SourceConfig {
                 path: PathBuf::from("/test"),
                 snapshot_dir: PathBuf::from(".snapshots"),
@@ -311,6 +319,8 @@ mod tests {
     #[test]
     fn test_config_deserialize() {
         let toml_content = r#"
+            name = "test"
+
             [[sources]]
             path = "/home"
             use_snapper = false
@@ -337,6 +347,8 @@ mod tests {
     #[test]
     fn test_encryption_config_deserialize() {
         let toml_content = r#"
+            name = "test"
+
             [[sources]]
             path = "/home"
 
@@ -366,6 +378,8 @@ mod tests {
     fn test_config_from_file() {
         let mut temp_file = NamedTempFile::new().unwrap();
         let toml_content = r#"
+            name = "test"
+
             [[sources]]
             path = "/test"
             use_snapper = false

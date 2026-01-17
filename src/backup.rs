@@ -6,12 +6,50 @@ use crate::hooks;
 use crate::liveboot;
 use log;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+/// Simple directory-based lock to prevent concurrent runs with same config name
+struct ConfigLock {
+    lock_dir: PathBuf,
+}
+
+impl ConfigLock {
+    fn acquire(config_name: &str) -> Result<Self, BackupError> {
+        let lock_parent = std::env::temp_dir().join("btrbak_locks");
+        fs::create_dir_all(&lock_parent).map_err(|e| {
+            BackupError::Btrfs(format!("Failed to create lock parent directory: {}", e))
+        })?;
+
+        let lock_dir = lock_parent.join(config_name);
+
+        match fs::create_dir(&lock_dir) {
+            Ok(()) => Ok(Self { lock_dir }),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(BackupError::Btrfs(format!(
+                "Another btrbak instance is already running with config name '{}'",
+                config_name
+            ))),
+            Err(e) => Err(BackupError::Btrfs(format!(
+                "Failed to create lock directory: {}",
+                e
+            ))),
+        }
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.lock_dir);
+    }
+}
 
 /// Main backup procedure
 pub fn run_backup(config_path: &PathBuf, dry_run: bool) -> Result<(), BackupError> {
     let config = Config::from_file(config_path)?;
     config.validate()?;
+
+    // Acquire lock to prevent concurrent runs with same config name
+    let _lock = ConfigLock::acquire(&config.name)?;
 
     log::info!("Starting backup with configuration:");
     log::info!("  Sources:");
@@ -36,7 +74,7 @@ pub fn run_backup(config_path: &PathBuf, dry_run: bool) -> Result<(), BackupErro
     for source in &config.sources {
         log::info!("Backing up source: {}", source.path.display());
 
-        match backup_single_source(source, &config.target, target_mount) {
+        match backup_single_source(source, &config.target, target_mount, &config.name) {
             Ok(()) => {
                 log::info!("Successfully backed up source: {}", source.path.display());
             }
@@ -78,9 +116,10 @@ fn backup_single_source(
     source: &SourceConfig,
     target_config: &TargetConfig,
     target_mount: &Path,
+    config_name: &str,
 ) -> Result<(), BackupError> {
     // Create local snapshot and get parent snapshot (if any)
-    let (snapshot_path, local_parent_snapshot) = create_local_snapshot(source)?;
+    let (snapshot_path, local_parent_snapshot) = create_local_snapshot(source, config_name)?;
 
     // For btrfs send -p, we need the parent snapshot on the source side
     // If we have a local parent snapshot, use it for incremental backup
@@ -96,7 +135,7 @@ fn backup_single_source(
     )?;
 
     // Clean up old local snapshot
-    cleanup_old_snapshot(source, local_parent_snapshot)?;
+    cleanup_old_snapshot(source, local_parent_snapshot, config_name)?;
 
     Ok(())
 }
@@ -129,7 +168,10 @@ fn mount_target(config: &Config) -> Result<device::MountGuard, BackupError> {
 /// Create a local snapshot of the source subvolume
 /// Returns (new_snapshot_path, parent_snapshot_path) where parent_snapshot_path is Some
 /// if there was a previous local snapshot that can be used for incremental backup
-fn create_local_snapshot(source: &SourceConfig) -> Result<(PathBuf, Option<PathBuf>), BackupError> {
+fn create_local_snapshot(
+    source: &SourceConfig,
+    config_name: &str,
+) -> Result<(PathBuf, Option<PathBuf>), BackupError> {
     let source_path = &source.path;
 
     if !btrfs::is_subvolume(source_path)? {
@@ -147,9 +189,9 @@ fn create_local_snapshot(source: &SourceConfig) -> Result<(PathBuf, Option<PathB
 
     // Dispatch to appropriate handler based on snapshot method
     if source.use_snapper {
-        create_snapper_local_snapshot(source, source_path, &snapshot_dir)
+        create_snapper_local_snapshot(source, source_path, &snapshot_dir, config_name)
     } else {
-        create_manual_local_snapshot(source, source_path, &snapshot_dir)
+        create_manual_local_snapshot(source, source_path, &snapshot_dir, config_name)
     }
 }
 
@@ -158,9 +200,10 @@ fn create_snapper_local_snapshot(
     source: &SourceConfig,
     _source_path: &Path,
     snapshot_dir: &Path,
+    config_name: &str,
 ) -> Result<(PathBuf, Option<PathBuf>), BackupError> {
     // Use snapper to create snapshot with single type and btrbak description
-    let snapshot_name = create_snapper_snapshot(source)?;
+    let snapshot_name = create_snapper_snapshot(source, config_name)?;
     let snapshot_path = snapshot_dir.join(&snapshot_name);
 
     // Verify snapper created the snapshot and it's a valid subvolume
@@ -174,7 +217,7 @@ fn create_snapper_local_snapshot(
     log::info!("Using snapper snapshot at: {}", snapshot_path.display());
 
     // Find previous snapper snapshot with btrbak tag for incremental backup
-    let parent_snapshot_path = find_previous_snapper_snapshot(source, snapshot_dir)?;
+    let parent_snapshot_path = find_previous_snapper_snapshot(source, snapshot_dir, config_name)?;
 
     Ok((snapshot_path, parent_snapshot_path))
 }
@@ -184,12 +227,13 @@ fn create_manual_local_snapshot(
     source: &SourceConfig,
     source_path: &Path,
     snapshot_dir: &Path,
+    config_name: &str,
 ) -> Result<(PathBuf, Option<PathBuf>), BackupError> {
-    let snapshot_name = &source.snapshot_name;
-    let snapshot_path = snapshot_dir.join(snapshot_name);
+    let base_name = format!("{}_{}", source.snapshot_name, config_name);
+    let snapshot_path = snapshot_dir.join(&base_name);
 
     // Prepare previous snapshot path for preserving old snapshot
-    let prev_name = format!("{}_prev", snapshot_name);
+    let prev_name = format!("{}_prev", base_name);
     let prev_path = snapshot_dir.join(&prev_name);
 
     // Clean up old _prev snapshot if it exists
@@ -216,7 +260,10 @@ fn create_manual_local_snapshot(
 }
 
 /// Create snapshot using snapper
-fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError> {
+fn create_snapper_snapshot(
+    source: &SourceConfig,
+    target_config_name: &str,
+) -> Result<String, BackupError> {
     use std::process::Command;
 
     // snapper_config must be set when use_snapper is true (validated in config)
@@ -226,6 +273,7 @@ fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError>
         .expect("snapper_config must be set when use_snapper is true");
 
     // Run snapper create command with single type and btrbak description
+    let description = format!("btrbak_{}", target_config_name);
     let output = Command::new("snapper")
         .arg("-c")
         .arg(config_name)
@@ -233,7 +281,7 @@ fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError>
         .arg("-t")
         .arg("single")
         .arg("-d")
-        .arg("btrbak")
+        .arg(&description)
         .arg("--read-only")
         .arg("--print-number")
         .output()?;
@@ -263,6 +311,7 @@ fn create_snapper_snapshot(source: &SourceConfig) -> Result<String, BackupError>
 fn find_previous_snapper_snapshot(
     source: &SourceConfig,
     snapshot_dir: &Path,
+    target_config_name: &str,
 ) -> Result<Option<PathBuf>, BackupError> {
     use std::process::Command;
 
@@ -292,6 +341,9 @@ fn find_previous_snapper_snapshot(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut backup_snapshots = Vec::new();
 
+    // Determine expected description based on target config name
+    let expected_description = format!("btrbak_{}", target_config_name);
+
     // Parse output lines
     for line in stdout.lines() {
         if line.trim().is_empty() || line.starts_with('#') {
@@ -304,9 +356,9 @@ fn find_previous_snapper_snapshot(
             let description = parts[1];
             let snapshot_type = parts[2];
 
-            // Look for single type snapshots with btrbak description
+            // Look for single type snapshots with matching description
             if snapshot_type == "single"
-                && description == "btrbak"
+                && description == expected_description
                 && let Ok(id) = number.parse::<u64>()
             {
                 backup_snapshots.push(id);
@@ -492,10 +544,11 @@ fn update_live_subvolume(
 fn cleanup_old_snapshot(
     source: &SourceConfig,
     local_parent_snapshot: Option<PathBuf>,
+    config_name: &str,
 ) -> Result<(), BackupError> {
     if source.use_snapper {
         // For snapper, clean up old btrbak snapshots
-        cleanup_old_snapper_snapshots(source)?;
+        cleanup_old_snapper_snapshots(source, config_name)?;
     } else if let Some(parent_path) = local_parent_snapshot {
         // For manual snapshots, delete the renamed parent snapshot
         if parent_path.exists() && btrfs::is_subvolume(&parent_path)? {
@@ -508,7 +561,10 @@ fn cleanup_old_snapshot(
 }
 
 /// Clean up old snapper snapshots with btrbak description
-fn cleanup_old_snapper_snapshots(source: &SourceConfig) -> Result<(), BackupError> {
+fn cleanup_old_snapper_snapshots(
+    source: &SourceConfig,
+    target_config_name: &str,
+) -> Result<(), BackupError> {
     use std::process::Command;
 
     // snapper_config must be set when use_snapper is true (validated in config)
@@ -535,6 +591,9 @@ fn cleanup_old_snapper_snapshots(source: &SourceConfig) -> Result<(), BackupErro
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut backup_snapshots = Vec::new();
 
+    // Determine expected description based on target config name
+    let expected_description = format!("btrbak_{}", target_config_name);
+
     // Parse output lines
     for line in stdout.lines() {
         if line.trim().is_empty() || line.starts_with('#') {
@@ -547,9 +606,9 @@ fn cleanup_old_snapper_snapshots(source: &SourceConfig) -> Result<(), BackupErro
             let description = parts[1];
             let snapshot_type = parts[2];
 
-            // Look for single type snapshots with btrbak description
+            // Look for single type snapshots with matching description
             if snapshot_type == "single"
-                && description == "btrbak"
+                && description == expected_description
                 && let Ok(id) = number.parse::<u64>()
             {
                 backup_snapshots.push(id);

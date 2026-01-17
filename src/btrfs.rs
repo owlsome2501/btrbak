@@ -1,5 +1,4 @@
 use crate::error::BackupError;
-use log;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -333,43 +332,77 @@ pub fn send_and_replace_safely(
         std::fs::create_dir_all(dest_dir)?;
     }
 
-    // Create a temporary directory for receiving
-    let temp_parent = dest_dir.join(".receive-temp");
-    if !temp_parent.exists() {
-        std::fs::create_dir(&temp_parent)?;
+    // Get the name of the subvolume that will be received
+    let received_base_name = get_subvolume_name(source)?;
+    let received_path = dest_dir.join(&received_base_name);
+    let needs_rename = received_base_name != subvol_name;
+
+    // Check for existing subvolumes that may conflict
+    let target_exists = is_subvolume(&target_path)?;
+
+    // Determine if there's a conflict at the location where the subvolume will be received
+    // Only check for conflict at received_path if it's different from target_path (needs_rename).
+    // If they're the same path, any conflict is already captured by target_exists.
+    let received_conflict = needs_rename && is_subvolume(&received_path)?;
+
+    // Prepare backup paths
+    let target_backup_path = dest_dir.join(format!("{}.{}", subvol_name, backup_suffix));
+    let received_backup_path = if received_conflict {
+        Some(dest_dir.join(format!("{}.conflict", received_base_name)))
+    } else {
+        None
+    };
+
+    // Rename conflicting subvolumes if they exist
+    if target_exists {
+        rename_subvolume(&target_path, &target_backup_path)?;
+    }
+    if let Some(backup) = &received_backup_path {
+        rename_subvolume(&received_path, backup)?;
     }
 
-    // Step 1: Receive the subvolume to temporary location
-    send_and_receive_piped(source, parent, &temp_parent)?;
+    // Helper to restore renamed subvolumes on error
+    let restore_renamed = || {
+        if target_exists {
+            let _ = rename_subvolume(&target_backup_path, &target_path);
+        }
+        if let Some(backup) = &received_backup_path {
+            let _ = rename_subvolume(backup, &received_path);
+        }
+    };
 
-    // The received subvolume will have the name from source path
-    let received_base_name = get_subvolume_name(source)?;
-    let received_path = temp_parent.join(&received_base_name);
-    if !received_path.exists() {
+    // Receive the subvolume directly into dest_dir
+    if let Err(e) = send_and_receive_piped(source, parent, dest_dir) {
+        restore_renamed();
+        return Err(e);
+    }
+
+    // Verify the subvolume was received
+    if !is_subvolume(&received_path)? {
+        restore_renamed();
         return Err(BackupError::Btrfs(format!(
             "Subvolume not received at expected location: {}",
             received_path.display()
         )));
     }
 
-    // Step 2: Safely replace the target with the received subvolume
-    // If target name is different from received name, we need to rename
-    if subvol_name == received_base_name {
-        move_and_replace_safely(&target_path, &received_path, backup_suffix)?;
-    } else {
-        // First move received subvolume to target name in temp location
-        let renamed_in_temp = temp_parent.join(&subvol_name);
-        rename_subvolume(&received_path, &renamed_in_temp)?;
-        move_and_replace_safely(&target_path, &renamed_in_temp, backup_suffix)?;
+    // Rename received subvolume to target name if needed
+    if needs_rename {
+        if let Err(e) = rename_subvolume(&received_path, &target_path) {
+            let _ = delete_subvolume(&received_path);
+            restore_renamed();
+            return Err(e);
+        }
     }
 
-    // Step 3: Clean up temporary directory
-    if let Err(e) = std::fs::remove_dir(&temp_parent) {
-        log::warn!(
-            "Failed to clean up temporary directory {}: {}",
-            temp_parent.display(),
-            e
-        );
+    // Clean up backup subvolumes
+    if target_exists {
+        delete_subvolume(&target_backup_path)?;
+    }
+
+    // Restore conflicting subvolume that was renamed to .conflict
+    if let Some(backup) = received_backup_path {
+        rename_subvolume(&backup, &received_path)?;
     }
 
     Ok(())

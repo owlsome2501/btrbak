@@ -4,14 +4,14 @@ use crate::config::{Config, SourceConfig, TargetConfig, TargetLocation};
 use crate::device;
 use crate::hooks;
 use crate::liveboot;
+use fs4::fs_std::FileExt;
 use log;
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-/// Simple directory-based lock to prevent concurrent runs with same config name
+/// File-based lock to prevent concurrent runs with same config name
 struct ConfigLock {
-    lock_dir: PathBuf,
+    _lock_file: File,
 }
 
 impl ConfigLock {
@@ -21,25 +21,20 @@ impl ConfigLock {
             BackupError::Btrfs(format!("Failed to create lock parent directory: {}", e))
         })?;
 
-        let lock_dir = lock_parent.join(config_name);
+        let lock_path = lock_parent.join(format!("{}.lock", config_name));
+        let lock_file = File::create(&lock_path)
+            .map_err(|e| BackupError::Btrfs(format!("Failed to create lock file: {}", e)))?;
 
-        match fs::create_dir(&lock_dir) {
-            Ok(()) => Ok(Self { lock_dir }),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(BackupError::Btrfs(format!(
+        // Try to acquire exclusive lock (non-blocking)
+        match lock_file.try_lock_exclusive() {
+            Ok(_) => Ok(Self {
+                _lock_file: lock_file,
+            }),
+            Err(_) => Err(BackupError::Btrfs(format!(
                 "Another btrbak instance is already running with config name '{}'",
                 config_name
             ))),
-            Err(e) => Err(BackupError::Btrfs(format!(
-                "Failed to create lock directory: {}",
-                e
-            ))),
         }
-    }
-}
-
-impl Drop for ConfigLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.lock_dir);
     }
 }
 

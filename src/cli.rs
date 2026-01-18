@@ -29,13 +29,6 @@ pub enum Commands {
         config: PathBuf,
     },
 
-    /// List available snapshots
-    ListSnapshots {
-        /// Path to configuration file (TOML)
-        #[arg(short, long, default_value = "btrbak.toml")]
-        config: PathBuf,
-    },
-
     /// Validate configuration file
     Validate {
         /// Path to configuration file (TOML)

@@ -13,9 +13,6 @@ fn main() -> Result<(), BackupError> {
         btrbak::cli::Commands::PrepareLive { config } => {
             backup::prepare_live_environment(&config)?;
         }
-        btrbak::cli::Commands::ListSnapshots { config } => {
-            backup::list_snapshots(&config)?;
-        }
         btrbak::cli::Commands::Validate { config } => {
             let config = Config::from_file(&config)?;
             config.validate()?;

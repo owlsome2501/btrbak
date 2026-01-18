@@ -11,18 +11,13 @@ A Rust tool for creating incremental Btrfs backups of multiple directories with 
 - **Live boot environments** - Bootable backup environments for system recovery
 - **LUKS encryption** - Secure offsite backups with optional encryption
 - **Snapper integration** - Works with existing snapper configurations
-- **Resource-safe operations** - RAII patterns for automatic cleanup and error recovery
 
 ## Key Features
 
 - 🔄 **Multi-source incremental backups** - Backup multiple directories simultaneously with efficient data transfer
 - 🔒 **Optional LUKS encryption** - Secure backup storage with keyfile or environment variable auth
 - 🚀 **Live boot environments** - Create bootable backup systems for disaster recovery
-- 🛡️ **Safe resource management** - RAII patterns ensure clean mount/unmount and error recovery
-- ⚙️ **Flexible TOML configuration** - Declarative configuration with sensible defaults
 - 🔌 **Snapper integration** - Leverage existing snapper configurations for system directories
-- 🎯 **Consistent volume naming** - Automatic `_vol` suffix naming across source and target
-- ⚡ **Parallel error handling** - One source failure doesn't stop other backups
 
 ## Quick Start
 
@@ -83,9 +78,6 @@ btrbak backup
 # Run a dry-run backup (no changes made)
 btrbak backup --dry-run
 
-# List available snapshots
-btrbak list-snapshots
-
 # Prepare live boot environment (initial setup)
 btrbak prepare-live
 ```
@@ -100,7 +92,8 @@ btrbak prepare-live
 
 ### Source Configuration
 
-The source configuration defines what you're backing up. You can configure multiple source directories to backup simultaneously using the `[[sources]]` array syntax:
+The source configuration defines what you're backing up.
+You can configure multiple source directories to backup simultaneously using the `[[sources]]` array syntax:
 
 ```toml
 # Backup configuration for a source directory
@@ -307,7 +300,6 @@ remove_snapper_config = true
    - Correct UUID-based device identifiers for the Btrfs filesystem
    - Proper subvolume mounts (`@/root_vol`, `@/home_vol`, etc.)
    - ESP mount entry if `/efi` directory exists in the live environment
-   - Swap configuration if present
 
 3. **remove_snapper_config**: Cleans up snapper configuration from the live boot environment to prevent snapper from modifying backup snapshots.
 
@@ -433,10 +425,10 @@ for each source in configuration.sources:
 **4. Incremental Data Transfer**
 ```
 # Full backup (first run):
-btrfs send /source/.snapshots/btrbak | btrfs receive /target/volume_vol
+btrfs send /source/.snapshots/btrbak | btrfs receive /target/
 
 # Incremental backup (subsequent runs):
-btrfs send -p /source/.snapshots/btrbak_prev /source/.snapshots/btrbak | btrfs receive /target/volume_vol
+btrfs send -p /source/.snapshots/btrbak_prev /source/.snapshots/btrbak | btrfs receive /target/
 ```
 
 **5. Error Handling & Recovery**
@@ -480,18 +472,6 @@ The tool maintains consistent naming across source and target:
 ## Architecture
 
 `btrbak` is built with reliability and safety as primary concerns, using modern Rust patterns and careful error handling.
-
-### Resource Management & Safety
-
-**RAII Patterns**
-- `MountGuard`: Automatically manages mount points and LUKS mappings
-- Cleanup on drop: Ensures no leftover mounts or encrypted mappings
-- Atomic operations: Where possible, uses atomic renames and transactions
-
-**Error Handling**
-- Per-source error isolation: One source failure doesn't stop others
-- Comprehensive error collection: All failures reported at end of backup
-- Safe rollback: Failed operations attempt to clean up their state
 
 ### Core Components
 

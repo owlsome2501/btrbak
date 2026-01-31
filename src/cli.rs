@@ -5,6 +5,14 @@ use std::path::PathBuf;
 #[command(name = "btrbak")]
 #[command(about = "Btrfs subvolume backup with live boot environment support")]
 pub struct Cli {
+    /// Enable verbose output (show all details)
+    #[arg(short, long, global = true, conflicts_with = "quiet")]
+    pub verbose: bool,
+
+    /// Suppress all output except errors
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

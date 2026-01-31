@@ -1,10 +1,10 @@
-use btrbak::{BackupError, Cli, Config, backup};
+use btrbak::{BackupError, Cli, Config, backup, ui};
 use clap::Parser;
+use std::process;
 
-fn main() -> Result<(), BackupError> {
-    env_logger::init();
-
+fn run() -> Result<(), BackupError> {
     let cli = Cli::parse();
+    ui::init(cli.verbose, cli.quiet);
 
     match cli.command {
         btrbak::cli::Commands::Backup { config, dry_run } => {
@@ -16,9 +16,16 @@ fn main() -> Result<(), BackupError> {
         btrbak::cli::Commands::Validate { config } => {
             let config = Config::from_file(&config)?;
             config.validate()?;
-            println!("Configuration is valid.");
+            ui::success("Configuration is valid");
         }
     }
 
     Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        ui::error_with_hints(&e.to_string(), &e.hints());
+        process::exit(1);
+    }
 }

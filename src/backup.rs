@@ -4,8 +4,8 @@ use crate::config::{Config, SourceConfig, TargetConfig, TargetLocation};
 use crate::device;
 use crate::hooks;
 use crate::liveboot;
+use crate::ui;
 use fs4::fs_std::FileExt;
-use log;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,6 +39,18 @@ impl ConfigLock {
     }
 }
 
+/// Compute the total number of backup steps for progress display
+fn compute_backup_steps(config: &Config) -> usize {
+    let mut steps = 0;
+    steps += 1; // Mount target
+    steps += config.sources.len(); // One step per source
+    if config.target.enable_live_boot {
+        steps += 1; // Live boot update
+    }
+    steps += 1; // Summary
+    steps
+}
+
 /// Main backup procedure
 pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> {
     let config = Config::from_file(config_path)?;
@@ -47,46 +59,65 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
     // Acquire lock to prevent concurrent runs with same config name
     let _lock = ConfigLock::acquire(&config.name)?;
 
-    log::info!("Starting backup with configuration:");
-    log::info!("  Sources:");
+    ui::header(&format!("Backup: {}", config.name));
+    ui::info("Sources:");
     for source in &config.sources {
-        log::info!("    - {}", source.path.display());
+        ui::info(&format!("  {}", source.path.display()));
     }
-    log::info!("  Target: {:?}", config.target.location);
+    ui::info(&format!("Target: {:?}", config.target.location));
 
     if dry_run {
-        log::info!("Dry run mode - no changes will be made");
+        ui::info("Dry run mode - no changes will be made");
         return Ok(());
     }
 
+    let total_steps = compute_backup_steps(&config);
+    let mut current_step = 0;
+
     // Step 1: Ensure target is mounted
+    current_step += 1;
+    ui::step(current_step, total_steps, "Mounting target");
     let mount_guard = mount_target(&config)?;
     let target_mount = mount_guard.mount_point();
+    ui::success("Target mounted");
 
     // Collect errors from each source backup
     let mut errors = Vec::new();
 
     // Backup each source
     for source in &config.sources {
-        log::info!("Backing up source: {}", source.path.display());
+        current_step += 1;
+        ui::step(
+            current_step,
+            total_steps,
+            &format!("Backing up {}", source.path.display()),
+        );
 
         match backup_single_source(source, &config.target, target_mount, &config.name) {
             Ok(()) => {
-                log::info!("Successfully backed up source: {}", source.path.display());
+                ui::success(&format!("Backed up {}", source.path.display()));
             }
             Err(e) => {
-                log::error!("Failed to backup source {}: {}", source.path.display(), e);
+                ui::error(&format!(
+                    "Failed to backup {}: {}",
+                    source.path.display(),
+                    e
+                ));
                 errors.push((source.path.clone(), e));
             }
         }
     }
 
-    // Step 5: Update live boot environment if enabled
+    // Update live boot environment if enabled
     if config.target.enable_live_boot && errors.is_empty() {
-        // Only update live boot environment if all backups succeeded
+        current_step += 1;
+        ui::step(current_step, total_steps, "Updating live boot environment");
+
         if let Err(e) = update_live_environment(&config, target_mount) {
-            log::error!("Failed to update live boot environment: {}", e);
+            ui::error(&format!("Failed to update live boot environment: {}", e));
             errors.push((PathBuf::from("live_boot"), e));
+        } else {
+            ui::success("Live boot environment updated");
         }
     }
 
@@ -103,7 +134,12 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
         )));
     }
 
-    log::info!("Backup completed successfully");
+    // Summary step
+    current_step += 1;
+    ui::step(current_step, total_steps, "Summary");
+    ui::success("Backup completed successfully");
+    ui::section_end();
+
     Ok(())
 }
 
@@ -115,6 +151,7 @@ fn backup_single_source(
     config_name: &str,
 ) -> Result<(), BackupError> {
     // Create local snapshot and get parent snapshot (if any)
+    ui::substep("Creating local snapshot");
     let (snapshot_path, local_parent_snapshot) = create_local_snapshot(source, config_name)?;
 
     // For btrfs send -p, we need the parent snapshot on the source side
@@ -122,6 +159,12 @@ fn backup_single_source(
     let parent_snapshot_for_send = local_parent_snapshot.as_deref();
 
     // Send snapshot to target
+    let mode = if parent_snapshot_for_send.is_some() {
+        "incremental"
+    } else {
+        "full"
+    };
+    ui::substep(&format!("Sending snapshot to target ({})", mode));
     send_snapshot(
         source,
         target_config,
@@ -131,6 +174,7 @@ fn backup_single_source(
     )?;
 
     // Clean up old local snapshot
+    ui::substep("Cleaning up old snapshots");
     cleanup_old_snapshot(source, local_parent_snapshot, config_name)?;
 
     Ok(())
@@ -210,7 +254,7 @@ fn create_snapper_local_snapshot(
         )));
     }
 
-    log::info!("Using snapper snapshot at: {}", snapshot_path.display());
+    ui::detail(&format!("Using snapper snapshot at: {}", snapshot_path.display()));
 
     // Find previous snapper snapshot with btrbak tag for incremental backup
     let parent_snapshot_path = find_previous_snapper_snapshot(source, snapshot_dir, config_name)?;
@@ -234,14 +278,14 @@ fn create_manual_local_snapshot(
 
     // Clean up old _prev snapshot if it exists
     if prev_path.exists() && btrfs::is_subvolume(&prev_path)? {
-        log::info!("Cleaning up old previous snapshot: {}", prev_path.display());
+        ui::detail(&format!("Cleaning up old previous snapshot: {}", prev_path.display()));
         btrfs::delete_subvolume(&prev_path)?;
     }
 
     // Check if there's an existing snapshot to preserve as parent
     let parent_snapshot_path = if snapshot_path.exists() && btrfs::is_subvolume(&snapshot_path)? {
         // Rename existing snapshot to preserve it as parent for incremental backup
-        log::info!("Renaming existing snapshot to: {}", prev_path.display());
+        ui::detail(&format!("Preserving previous snapshot for incremental backup"));
         btrfs::rename_subvolume(&snapshot_path, &prev_path)?;
         Some(prev_path)
     } else {
@@ -250,7 +294,7 @@ fn create_manual_local_snapshot(
 
     // Create new read-only snapshot
     btrfs::create_snapshot(source_path, &snapshot_path)?;
-    log::info!("Created local snapshot at: {}", snapshot_path.display());
+    ui::detail(&format!("Created snapshot at: {}", snapshot_path.display()));
 
     Ok((snapshot_path, parent_snapshot_path))
 }
@@ -270,8 +314,8 @@ fn create_snapper_snapshot(
 
     // Run snapper create command with single type and btrbak description
     let description = format!("btrbak_{}", target_config_name);
-    let output = Command::new("snapper")
-        .arg("-c")
+    let mut cmd = Command::new("snapper");
+    cmd.arg("-c")
         .arg(config_name)
         .arg("create")
         .arg("-t")
@@ -279,11 +323,14 @@ fn create_snapper_snapshot(
         .arg("-d")
         .arg(&description)
         .arg("--read-only")
-        .arg("--print-number")
-        .output()?;
+        .arg("--print-number");
+    ui::cmd_start(&ui::format_cmd(&cmd));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Btrfs(format!(
             "Failed to create snapper snapshot for config '{}': {}",
             config_name, stderr
@@ -372,20 +419,20 @@ fn find_previous_snapper_snapshot(
         let parent_path = snapshot_dir.join(format!("{}/snapshot", parent_id));
 
         if btrfs::is_subvolume(&parent_path)? {
-            log::info!(
+            ui::detail(&format!(
                 "Found previous snapper snapshot at: {}",
                 parent_path.display()
-            );
+            ));
             Ok(Some(parent_path))
         } else {
-            log::warn!(
+            ui::warning(&format!(
                 "Previous snapper snapshot path is not a subvolume: {}",
                 parent_path.display()
-            );
+            ));
             Ok(None)
         }
     } else {
-        log::info!("No previous snapper snapshot found for incremental backup");
+        ui::detail("No previous snapper snapshot found for incremental backup");
         Ok(None)
     }
 }
@@ -422,11 +469,11 @@ fn send_snapshot(
         Some(&target_subvol_name),
     )?;
 
-    log::info!(
+    ui::detail(&format!(
         "Sent snapshot to: {}/{}",
         target_parent_dir.display(),
         target_subvol_name
-    );
+    ));
     Ok(())
 }
 
@@ -436,44 +483,35 @@ fn update_live_environment(config: &Config, target_mount: &Path) -> Result<(), B
         let live_root_subvolume = config.target.live_root_subvolume.as_deref().unwrap_or("@");
         let live_root_path = target_mount.join(live_root_subvolume);
 
-        log::info!(
-            "Updating live boot environment for {} sources",
+        ui::detail(&format!(
+            "Updating live boot for {} sources",
             config.sources.len()
-        );
+        ));
 
         // Update each source in live boot environment
         for source in &config.sources {
             let subvolume_name = btrfs::get_subvolume_name_with_suffix(&source.path);
 
-            log::info!(
-                "Processing source: {} (subvolume: {})",
-                source.path.display(),
+            ui::substep(&format!(
+                "Updating live subvolume: {}",
                 subvolume_name
-            );
+            ));
 
             let snapshot_path = target_mount.join("@snapshots").join(&subvolume_name);
 
             if btrfs::is_subvolume(&snapshot_path)? {
-                log::info!(
-                    "Updating subvolume {} in live boot environment",
-                    subvolume_name
-                );
                 update_live_subvolume(&live_root_path, &snapshot_path, &subvolume_name)?;
-
-                log::info!(
-                    "Live boot environment updated for {}",
-                    source.path.display()
-                );
             } else {
-                log::warn!(
+                ui::warning(&format!(
                     "Snapshot subvolume not found at {}, skipping live update for {}",
                     snapshot_path.display(),
                     source.path.display()
-                );
+                ));
             }
         }
 
         // Run hooks after all sources are updated
+        ui::substep("Running post-backup hooks");
         hooks::run_hooks(
             &live_root_path,
             target_mount,
@@ -482,8 +520,6 @@ fn update_live_environment(config: &Config, target_mount: &Path) -> Result<(), B
             &live_boot_config.boot_entry,
             config,
         )?;
-
-        log::info!("Live boot environment update complete");
     }
 
     Ok(())
@@ -500,7 +536,7 @@ fn update_live_subvolume(
     // Create read-write snapshot and replace with atomic renames
     btrfs::snapshot_and_replace_safely(&target_subvolume, snapshot, "old")?;
 
-    log::info!("Updated subvolume {} with latest snapshot", volume_name);
+    ui::detail(&format!("Updated subvolume {} with latest snapshot", volume_name));
     Ok(())
 }
 
@@ -516,7 +552,7 @@ fn cleanup_old_snapshot(
     } else if let Some(parent_path) = local_parent_snapshot {
         // For manual snapshots, delete the renamed parent snapshot
         if parent_path.exists() && btrfs::is_subvolume(&parent_path)? {
-            log::info!("Deleting old local snapshot: {}", parent_path.display());
+            ui::detail(&format!("Deleting old local snapshot: {}", parent_path.display()));
             btrfs::delete_subvolume(&parent_path)?;
         }
     }
@@ -548,7 +584,7 @@ fn cleanup_old_snapper_snapshots(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        log::warn!("Failed to list snapper snapshots for cleanup: {}", stderr);
+        ui::warning(&format!("Failed to list snapper snapshots for cleanup: {}", stderr));
         return Ok(());
     }
 
@@ -586,7 +622,7 @@ fn cleanup_old_snapper_snapshots(
     // Keep the latest 2 snapshots (current and previous for next incremental)
     // Delete older ones
     for &snapshot_id in backup_snapshots.iter().skip(2) {
-        log::info!("Deleting old snapper snapshot #{}", snapshot_id);
+        ui::detail(&format!("Deleting old snapper snapshot #{}", snapshot_id));
 
         let output = Command::new("snapper")
             .arg("-c")
@@ -597,11 +633,10 @@ fn cleanup_old_snapper_snapshots(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            log::warn!(
+            ui::warning(&format!(
                 "Failed to delete snapper snapshot #{}: {}",
-                snapshot_id,
-                stderr
-            );
+                snapshot_id, stderr
+            ));
         }
     }
 
@@ -624,10 +659,15 @@ pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
         .as_ref()
         .ok_or_else(|| BackupError::Config(anyhow::anyhow!("Live boot configuration missing")))?;
 
+    ui::header("Prepare Live Boot Environment");
+
     // Mount target if needed
+    ui::step(1, 2, "Mounting target");
     let mount_guard = mount_target(&config)?;
+    ui::success("Target mounted");
 
     // Prepare live boot environment
+    ui::step(2, 2, "Setting up live boot");
     let live_root_subvolume = config.target.live_root_subvolume.as_deref().unwrap_or("@");
     let snapshot_subvolume = config
         .target
@@ -641,6 +681,7 @@ pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
         snapshot_subvolume,
     )?;
 
-    log::info!("Live boot environment prepared successfully");
+    ui::success("Live boot environment prepared successfully");
+    ui::section_end();
     Ok(())
 }

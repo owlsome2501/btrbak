@@ -1,30 +1,29 @@
 use crate::error::BackupError;
+use crate::ui;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Check if a path is a btrfs subvolume
 pub fn is_subvolume(path: &Path) -> Result<bool, BackupError> {
-    let output = Command::new("btrfs")
-        .arg("subvolume")
-        .arg("show")
-        .arg(path)
-        .output()?;
+    let mut cmd = Command::new("btrfs");
+    cmd.arg("subvolume").arg("show").arg(path);
+    ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
+    let output = cmd.output()?;
     Ok(output.status.success())
 }
 
 /// Create a read-only snapshot of a subvolume
 pub fn create_snapshot(source: &Path, dest: &Path) -> Result<(), BackupError> {
-    let output = Command::new("btrfs")
-        .arg("subvolume")
-        .arg("snapshot")
-        .arg("-r")
-        .arg(source)
-        .arg(dest)
-        .output()?;
+    let mut cmd = Command::new("btrfs");
+    cmd.arg("subvolume").arg("snapshot").arg("-r").arg(source).arg(dest);
+    ui::cmd_start(&ui::format_cmd(&cmd));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Btrfs(format!(
             "Failed to create snapshot from {} to {}: {}",
             source.display(),
@@ -38,15 +37,15 @@ pub fn create_snapshot(source: &Path, dest: &Path) -> Result<(), BackupError> {
 
 /// Create a read-write snapshot of a subvolume
 pub fn create_snapshot_rw(source: &Path, dest: &Path) -> Result<(), BackupError> {
-    let output = Command::new("btrfs")
-        .arg("subvolume")
-        .arg("snapshot")
-        .arg(source)
-        .arg(dest)
-        .output()?;
+    let mut cmd = Command::new("btrfs");
+    cmd.arg("subvolume").arg("snapshot").arg(source).arg(dest);
+    ui::cmd_start(&ui::format_cmd(&cmd));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Btrfs(format!(
             "Failed to create read-write snapshot from {} to {}: {}",
             source.display(),
@@ -60,14 +59,15 @@ pub fn create_snapshot_rw(source: &Path, dest: &Path) -> Result<(), BackupError>
 
 /// Create a new btrfs subvolume
 pub fn create_subvolume(path: &Path) -> Result<(), BackupError> {
-    let output = Command::new("btrfs")
-        .arg("subvolume")
-        .arg("create")
-        .arg(path)
-        .output()?;
+    let mut cmd = Command::new("btrfs");
+    cmd.arg("subvolume").arg("create").arg(path);
+    ui::cmd_start(&ui::format_cmd(&cmd));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Btrfs(format!(
             "Failed to create subvolume {}: {}",
             path.display(),
@@ -80,14 +80,15 @@ pub fn create_subvolume(path: &Path) -> Result<(), BackupError> {
 
 /// Delete a subvolume (snapshot)
 pub fn delete_subvolume(path: &Path) -> Result<(), BackupError> {
-    let output = Command::new("btrfs")
-        .arg("subvolume")
-        .arg("delete")
-        .arg(path)
-        .output()?;
+    let mut cmd = Command::new("btrfs");
+    cmd.arg("subvolume").arg("delete").arg(path);
+    ui::cmd_start(&ui::format_cmd(&cmd));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Btrfs(format!(
             "Failed to delete subvolume {}: {}",
             path.display(),
@@ -137,6 +138,14 @@ pub fn send_and_receive_piped(
     parent: Option<&Path>,
     dest_dir: &Path,
 ) -> Result<(), BackupError> {
+    // Display as a single logical piped command
+    let send_part = if let Some(p) = parent {
+        format!("btrfs send -p {} {}", p.display(), source.display())
+    } else {
+        format!("btrfs send {}", source.display())
+    };
+    ui::cmd_start(&format!("{} | btrfs receive {}", send_part, dest_dir.display()));
+
     let mut send_child = send_subvolume_process(source, parent)?;
     let mut recv_child = receive_subvolume_process(dest_dir)?;
 
@@ -164,6 +173,7 @@ pub fn send_and_receive_piped(
 
     if !send_output.status.success() {
         let stderr = String::from_utf8_lossy(&send_output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Btrfs(format!(
             "Failed to send subvolume {}: {}",
             source.display(),
@@ -173,6 +183,7 @@ pub fn send_and_receive_piped(
 
     if !recv_output.status.success() {
         let stderr = String::from_utf8_lossy(&recv_output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Btrfs(format!(
             "Failed to receive subvolume to {}: {}",
             dest_dir.display(),
@@ -214,11 +225,11 @@ pub fn find_latest_snapshot(snapshot_dir: &Path) -> Result<Option<PathBuf>, Back
 
 /// Get the subvolume ID of a path
 pub fn get_subvolume_id(path: &Path) -> Result<u64, BackupError> {
-    let output = Command::new("btrfs")
-        .arg("subvolume")
-        .arg("show")
-        .arg(path)
-        .output()?;
+    let mut cmd = Command::new("btrfs");
+    cmd.arg("subvolume").arg("show").arg(path);
+    ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         return Err(BackupError::Btrfs(format!(
@@ -416,7 +427,6 @@ pub fn send_and_replace_safely(
     Ok(())
 }
 
-/// Safely replace a subvolume by moving another subvolume into its place
 /// Safely replace a subvolume by moving another subvolume into its place using atomic rename operations
 /// This is used when `source_path` is already a subvolume that can be directly moved/renamed
 pub fn move_and_replace_safely(
@@ -490,11 +500,10 @@ pub fn get_subvolume_name_with_suffix(path: &Path) -> String {
 
 /// Check if a path is a btrfs filesystem
 pub fn is_btrfs_filesystem(path: &Path) -> Result<bool, BackupError> {
-    let output = Command::new("btrfs")
-        .arg("filesystem")
-        .arg("show")
-        .arg(path)
-        .output()?;
+    let mut cmd = Command::new("btrfs");
+    cmd.arg("filesystem").arg("show").arg(path);
+    ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
+    let output = cmd.output()?;
     Ok(output.status.success())
 }

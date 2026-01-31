@@ -1,6 +1,6 @@
 use crate::btrfs;
 use crate::error::BackupError;
-use log;
+use crate::ui;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,14 +16,17 @@ pub fn run_hooks(
     config: &crate::config::Config,
 ) -> Result<(), BackupError> {
     if hook_config.copy_kernel {
+        ui::substep("Copying kernel and initramfs to ESP");
         copy_kernel_to_esp(live_root, esp_path, boot_entry)?;
     }
 
     if hook_config.regenerate_fstab {
+        ui::substep("Regenerating fstab for live boot");
         regenerate_fstab(live_root, target_mount, config)?;
     }
 
     if hook_config.remove_snapper_config {
+        ui::substep("Removing snapper config from live boot");
         remove_snapper_config(live_root)?;
     }
 
@@ -76,35 +79,35 @@ fn copy_kernel_to_esp(
     // Copy kernel
     if kernel_source.exists() {
         fs::copy(&kernel_source, &kernel_dest)?;
-        log::info!(
+        ui::detail(&format!(
             "Copied kernel: {} -> {}",
             kernel_source.display(),
             kernel_dest.display()
-        );
+        ));
     } else {
-        log::warn!("Kernel not found at: {}", kernel_source.display());
+        ui::warning(&format!("Kernel not found at: {}", kernel_source.display()));
     }
 
     // Copy initramfs
     if initramfs_source.exists() {
         fs::copy(&initramfs_source, &initramfs_dest)?;
-        log::info!(
+        ui::detail(&format!(
             "Copied initramfs: {} -> {}",
             initramfs_source.display(),
             initramfs_dest.display()
-        );
+        ));
     } else {
-        log::warn!("Initramfs not found at: {}", initramfs_source.display());
+        ui::warning(&format!("Initramfs not found at: {}", initramfs_source.display()));
     }
 
     // Copy fallback initramfs if exists
     if initramfs_fallback_source.exists() {
         fs::copy(&initramfs_fallback_source, &initramfs_fallback_dest)?;
-        log::info!(
+        ui::detail(&format!(
             "Copied fallback initramfs: {} -> {}",
             initramfs_fallback_source.display(),
             initramfs_fallback_dest.display()
-        );
+        ));
     }
 
     Ok(())
@@ -116,56 +119,35 @@ fn regenerate_fstab(
     target_mount: &Path,
     config: &crate::config::Config,
 ) -> Result<(), BackupError> {
-    log::info!("Regenerating fstab for live boot environment...");
-
     let fstab_path = live_root.join("etc/fstab");
-    log::debug!("Target fstab path: {}", fstab_path.display());
 
     // Generate fstab entries
-    log::info!("Generating fstab entries...");
     let fstab_content = generate_basic_fstab(target_mount, config);
 
     // Backup old fstab if exists
     if fstab_path.exists() {
         let backup_path = fstab_path.with_extension("fstab.backup");
-        log::info!("Backing up existing fstab to: {}", backup_path.display());
+        ui::detail(&format!("Backing up existing fstab to: {}", backup_path.display()));
         fs::copy(&fstab_path, &backup_path)?;
-    } else {
-        log::info!("No existing fstab found, creating new one");
     }
 
-    // Analyze and log generated entries before writing
+    // Analyze generated entries
     let entries: Vec<&str> = fstab_content
         .lines()
         .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
         .collect();
 
-    let line_count = fstab_content.lines().count();
-
-    log::info!("Fstab analysis:");
-    log::info!("  Total lines: {}", line_count);
-    log::info!("  Filesystem entries: {}", entries.len());
-
-    if !entries.is_empty() {
-        log::info!("  Generated entries:");
-        for entry in entries {
-            // Parse entry for better display
-            let parts: Vec<&str> = entry.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let filesystem = parts[0];
-                let mount_point = parts[1];
-                log::info!("    - {} -> {}", filesystem, mount_point);
-            } else {
-                log::info!("    - {}", entry);
-            }
+    ui::detail(&format!("Generated {} fstab entries", entries.len()));
+    for entry in &entries {
+        let parts: Vec<&str> = entry.split_whitespace().collect();
+        if parts.len() >= 2 {
+            ui::detail(&format!("  {} -> {}", parts[0], parts[1]));
         }
     }
 
     // Write new fstab
-    log::info!("Writing new fstab to: {}", fstab_path.display());
     fs::write(&fstab_path, fstab_content)?;
-
-    log::info!("Fstab regeneration complete!");
+    ui::detail(&format!("Wrote fstab to: {}", fstab_path.display()));
 
     Ok(())
 }
@@ -217,15 +199,16 @@ fn generate_basic_fstab(target_mount: &Path, config: &crate::config::Config) -> 
 
 /// Get UUID of device mounted at a path
 fn get_device_uuid(mount_point: &Path) -> Result<String, BackupError> {
-    // Use findmnt to get device UUID
-    let output = Command::new("findmnt")
-        .arg("--mountpoint")
+    let mut cmd = Command::new("findmnt");
+    cmd.arg("--mountpoint")
         .arg(mount_point)
         .arg("--output")
         .arg("UUID")
         .arg("--noheadings")
-        .arg("--first-only")
-        .output()?;
+        .arg("--first-only");
+    ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         return Err(BackupError::Hook(format!(
@@ -282,4 +265,3 @@ fn remove_snapper_config(live_root: &Path) -> Result<(), BackupError> {
 
     Ok(())
 }
-

@@ -1,6 +1,7 @@
 use crate::btrfs;
 use crate::config::{BootEntryConfig, LiveBootConfig};
 use crate::error::BackupError;
+use crate::ui;
 use std::path::Path;
 use std::process::Command;
 
@@ -16,16 +17,20 @@ pub fn prepare_live_boot(
     let root_subvol = btrfs_mount.join(live_root_subvolume);
 
     if !snapshots_subvol.exists() {
+        ui::substep(&format!("Creating snapshots subvolume: {}", snapshot_subvolume));
         btrfs::create_subvolume(&snapshots_subvol)?;
     }
 
     if !root_subvol.exists() {
+        ui::substep(&format!("Creating live root subvolume: {}", live_root_subvolume));
         btrfs::create_subvolume(&root_subvol)?;
     }
 
     // Initialize bootloader if ESP path provided
     if config.esp_path.exists() {
+        ui::substep("Initializing systemd-boot");
         init_systemd_boot(&config.esp_path)?;
+        ui::substep("Creating boot entry");
         create_boot_entry(
             btrfs_mount,
             &config.esp_path,
@@ -39,14 +44,15 @@ pub fn prepare_live_boot(
 
 /// Initialize systemd-boot on ESP
 fn init_systemd_boot(esp_path: &Path) -> Result<(), BackupError> {
-    let output = Command::new("bootctl")
-        .arg("--esp-path")
-        .arg(esp_path)
-        .arg("install")
-        .output()?;
+    let mut cmd = Command::new("bootctl");
+    cmd.arg("--esp-path").arg(esp_path).arg("install");
+    ui::cmd_start(&ui::format_cmd(&cmd));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Bootloader(format!(
             "Failed to install systemd-boot to {}: {}",
             esp_path.display(),
@@ -108,14 +114,16 @@ fn create_boot_entry(
 
 /// Find the UUID of the btrfs filesystem mounted at the given path
 fn find_btrfs_device(mount_point: &Path) -> Result<String, BackupError> {
-    let output = Command::new("findmnt")
-        .arg("--mountpoint")
+    let mut cmd = Command::new("findmnt");
+    cmd.arg("--mountpoint")
         .arg(mount_point)
         .arg("--output")
         .arg("UUID")
         .arg("--noheadings")
-        .arg("--first-only")
-        .output()?;
+        .arg("--first-only");
+    ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         return Err(BackupError::Mount(format!(
@@ -134,4 +142,3 @@ fn find_btrfs_device(mount_point: &Path) -> Result<String, BackupError> {
 
     Ok(uuid)
 }
-

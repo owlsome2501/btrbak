@@ -1,5 +1,5 @@
 use crate::error::BackupError;
-use log;
+use crate::ui;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile;
@@ -16,13 +16,15 @@ pub fn mount_device(device: &str, mount_point: &Path) -> Result<(), BackupError>
         return Ok(());
     }
 
-    let output = Command::new("mount")
-        .arg(device)
-        .arg(mount_point)
-        .output()?;
+    let mut cmd = Command::new("mount");
+    cmd.arg(device).arg(mount_point);
+    ui::cmd_start(&ui::format_cmd(&cmd));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Mount(format!(
             "Failed to mount {} to {}: {}",
             device,
@@ -36,10 +38,15 @@ pub fn mount_device(device: &str, mount_point: &Path) -> Result<(), BackupError>
 
 /// Unmount a mount point
 pub fn unmount(mount_point: &Path) -> Result<(), BackupError> {
-    let output = Command::new("umount").arg(mount_point).output()?;
+    let mut cmd = Command::new("umount");
+    cmd.arg(mount_point);
+    ui::cmd_start(&ui::format_cmd(&cmd));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Mount(format!(
             "Failed to unmount {}: {}",
             mount_point.display(),
@@ -52,25 +59,26 @@ pub fn unmount(mount_point: &Path) -> Result<(), BackupError> {
 
 /// Check if a path is already mounted
 pub fn is_mounted(path: &Path) -> Result<bool, BackupError> {
-    let output = Command::new("findmnt")
-        .arg("--mountpoint")
-        .arg(path)
-        .arg("--noheadings")
-        .output()?;
+    let mut cmd = Command::new("findmnt");
+    cmd.arg("--mountpoint").arg(path).arg("--noheadings");
+    ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
+    let output = cmd.output()?;
     Ok(output.status.success())
 }
 
 /// Find the mount point of a device
 pub fn find_mount_point(device: &str) -> Result<Option<PathBuf>, BackupError> {
-    let output = Command::new("findmnt")
-        .arg("--source")
+    let mut cmd = Command::new("findmnt");
+    cmd.arg("--source")
         .arg(device)
         .arg("--output")
         .arg("TARGET")
         .arg("--noheadings")
-        .arg("--first-only")
-        .output()?;
+        .arg("--first-only");
+    ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         return Ok(None);
@@ -86,11 +94,11 @@ pub fn find_mount_point(device: &str) -> Result<Option<PathBuf>, BackupError> {
 
 /// Check if a device is a LUKS encrypted device
 pub fn is_luks_device(device: &str) -> Result<bool, BackupError> {
-    let output = Command::new("cryptsetup")
-        .arg("isLuks")
-        .arg(device)
-        .output()?;
+    let mut cmd = Command::new("cryptsetup");
+    cmd.arg("isLuks").arg(device);
+    ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
+    let output = cmd.output()?;
     Ok(output.status.success())
 }
 
@@ -101,17 +109,19 @@ pub fn open_luks_device(
     keyfile: Option<&Path>,
     passphrase_env: Option<&str>,
 ) -> Result<String, BackupError> {
-    let mut cmd = Command::new("cryptsetup");
-    cmd.arg("open");
-
     if let Some(keyfile) = keyfile {
-        cmd.arg("--key-file")
+        let mut cmd = Command::new("cryptsetup");
+        cmd.arg("open")
+            .arg("--key-file")
             .arg(keyfile)
             .arg(device)
             .arg(mapping_name);
+        ui::cmd_start(&ui::format_cmd(&cmd));
+
         let output = cmd.output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            ui::cmd_stderr_output(&stderr);
             return Err(BackupError::Mount(format!(
                 "Failed to open LUKS device {}: {}",
                 device, stderr
@@ -125,6 +135,9 @@ pub fn open_luks_device(
                 env_var, e
             ))
         })?;
+
+        ui::cmd_start(&format!("cryptsetup open --key-file - {} {}", device, mapping_name));
+
         // Use stdin for passphrase
         let mut child = Command::new("cryptsetup")
             .arg("open")
@@ -141,14 +154,13 @@ pub fn open_luks_device(
         let output = child.wait_with_output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            ui::cmd_stderr_output(&stderr);
             return Err(BackupError::Mount(format!(
                 "Failed to open LUKS device {}: {}",
                 device, stderr
             )));
         }
     } else {
-        // No keyfile or env var, will prompt interactively (not suitable for automation)
-        // For now, we'll return an error
         return Err(BackupError::Mount(
             "No keyfile or passphrase environment variable provided for LUKS device".to_string(),
         ));
@@ -159,13 +171,15 @@ pub fn open_luks_device(
 
 /// Close a LUKS mapping
 pub fn close_luks_device(mapping_name: &str) -> Result<(), BackupError> {
-    let output = Command::new("cryptsetup")
-        .arg("close")
-        .arg(mapping_name)
-        .output()?;
+    let mut cmd = Command::new("cryptsetup");
+    cmd.arg("close").arg(mapping_name);
+    ui::cmd_start(&ui::format_cmd(&cmd));
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        ui::cmd_stderr_output(&stderr);
         return Err(BackupError::Mount(format!(
             "Failed to close LUKS mapping {}: {}",
             mapping_name, stderr
@@ -257,14 +271,14 @@ impl Drop for MountGuard {
         if self.temp_dir.is_some()
             && let Err(e) = unmount(&self.mount_point)
         {
-            log::warn!("Failed to unmount {}: {}", self.mount_point.display(), e);
+            ui::warning(&format!("Failed to unmount {}: {}", self.mount_point.display(), e));
         }
 
         // Close LUKS mapping if exists
         if let Some(mapping_name) = &self.luks_mapping
             && let Err(e) = close_luks_device(mapping_name)
         {
-            log::warn!("Failed to close LUKS mapping {}: {}", mapping_name, e);
+            ui::warning(&format!("Failed to close LUKS mapping {}: {}", mapping_name, e));
         }
     }
 }

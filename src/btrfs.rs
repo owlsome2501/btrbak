@@ -160,12 +160,43 @@ pub fn send_and_receive_piped(
         .take()
         .ok_or_else(|| BackupError::Btrfs("Failed to get stdin for receive process".to_string()))?;
 
-    // Pipe the data
-    use std::io::copy;
-    copy(
-        &mut std::io::BufReader::new(send_stdout),
-        &mut std::io::BufWriter::new(recv_stdin),
-    )?;
+    // Pipe the data with progress tracking
+    {
+        use std::io::{Read, Write};
+        use std::time::Instant;
+
+        let mut reader = std::io::BufReader::new(send_stdout);
+        let mut writer = std::io::BufWriter::new(recv_stdin);
+        let mut buf = [0u8; 256 * 1024];
+        let mut total_bytes: u64 = 0;
+        let start = Instant::now();
+        let mut last_update = start;
+
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n])?;
+            total_bytes += n as u64;
+
+            let now = Instant::now();
+            if now.duration_since(last_update).as_millis() >= 500 {
+                let elapsed = now.duration_since(start).as_secs_f64();
+                let speed = if elapsed > 0.0 {
+                    (total_bytes as f64 / elapsed) as u64
+                } else {
+                    0
+                };
+                ui::transfer_progress(total_bytes, speed);
+                last_update = now;
+            }
+        }
+        writer.flush()?;
+
+        let elapsed = start.elapsed().as_secs_f64();
+        ui::transfer_done(total_bytes, elapsed);
+    }
 
     // Wait for both processes
     let send_output = send_child.wait_with_output()?;

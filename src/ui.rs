@@ -1,4 +1,5 @@
 use console::{Style, Term};
+use std::io::Write as _;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -160,6 +161,65 @@ pub fn section_end() {
         return;
     }
     let _ = s.term.write_line("");
+}
+
+/// Format byte count into human-readable string (e.g. "12.34 MiB")
+pub fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * KIB;
+    const GIB: f64 = 1024.0 * MIB;
+
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.2} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.2} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// In-place progress update on the current line (no trailing newline).
+/// Overwrites previous content via `\r`.
+pub fn transfer_progress(transferred: u64, speed: u64) {
+    let s = state();
+    if s.verbosity == Verbosity::Quiet {
+        return;
+    }
+    let style = Style::new().dim().cyan();
+    let msg = format!(
+        "    {} | {}/s",
+        format_bytes(transferred),
+        format_bytes(speed),
+    );
+    // \r moves cursor to start of line; clear_line removes old text
+    let _ = s.term.clear_line();
+    let _ = write!(&s.term, "\r{}", style.apply_to(&msg));
+    let _ = s.term.flush();
+}
+
+/// Finalize the progress line with final stats, replacing the live line.
+pub fn transfer_done(transferred: u64, elapsed_secs: f64) {
+    let s = state();
+    if s.verbosity == Verbosity::Quiet {
+        return;
+    }
+    let avg_speed = if elapsed_secs > 0.0 {
+        (transferred as f64 / elapsed_secs) as u64
+    } else {
+        0
+    };
+    let style = Style::new().dim().cyan();
+    let msg = format!(
+        "    {} transferred in {:.1}s ({}/s)",
+        format_bytes(transferred),
+        elapsed_secs,
+        format_bytes(avg_speed),
+    );
+    let _ = s.term.clear_line();
+    let _ = s.term.write_line(&format!("\r{}", style.apply_to(&msg)));
 }
 
 /// Format a `Command` into a display string

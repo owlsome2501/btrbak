@@ -2,6 +2,8 @@ use console::{Style, Term};
 use std::io::Write as _;
 use std::process::Command;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verbosity {
@@ -13,6 +15,8 @@ enum Verbosity {
 struct UiState {
     verbosity: Verbosity,
     term: Term,
+    is_tty: bool,
+    last_progress_nanos: AtomicU64,
 }
 
 static UI: OnceLock<UiState> = OnceLock::new();
@@ -26,16 +30,27 @@ pub fn init(verbose: bool, quiet: bool) {
         Verbosity::Normal
     };
 
+    let term = Term::stderr();
+    let is_tty = term.is_term();
+
     let _ = UI.set(UiState {
         verbosity,
-        term: Term::stderr(),
+        term,
+        is_tty,
+        last_progress_nanos: AtomicU64::new(0),
     });
 }
 
 fn state() -> &'static UiState {
-    UI.get_or_init(|| UiState {
-        verbosity: Verbosity::Normal,
-        term: Term::stderr(),
+    UI.get_or_init(|| {
+        let term = Term::stderr();
+        let is_tty = term.is_term();
+        UiState {
+            verbosity: Verbosity::Normal,
+            term,
+            is_tty,
+            last_progress_nanos: AtomicU64::new(0),
+        }
     })
 }
 
@@ -181,26 +196,46 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// In-place progress update on the current line (no trailing newline).
-/// Overwrites previous content via `\r`.
-pub fn transfer_progress(transferred: u64, speed: u64) {
+/// Self-throttling in-place progress update.
+/// Internally enforces 500ms minimum between updates.
+/// Skips entirely on non-TTY to avoid ANSI garbage in log files.
+pub fn transfer_progress(transferred: u64, start: &Instant) {
     let s = state();
-    if s.verbosity == Verbosity::Quiet {
+    if s.verbosity == Verbosity::Quiet || !s.is_tty {
         return;
     }
-    let style = Style::new().dim().cyan();
-    let msg = format!(
+
+    let elapsed = start.elapsed();
+    let now_nanos = elapsed.as_nanos() as u64;
+    let last = s.last_progress_nanos.load(Ordering::Relaxed);
+
+    // Throttle: skip if less than 500ms since last update
+    if now_nanos.saturating_sub(last) < 500_000_000 {
+        return;
+    }
+    s.last_progress_nanos.store(now_nanos, Ordering::Relaxed);
+
+    let elapsed_secs = elapsed.as_secs_f64();
+    let speed = if elapsed_secs > 0.0 {
+        (transferred as f64 / elapsed_secs) as u64
+    } else {
+        0
+    };
+
+    let content = format!(
         "    {} | {}/s",
         format_bytes(transferred),
         format_bytes(speed),
     );
-    // \r moves cursor to start of line; clear_line removes old text
-    let _ = s.term.clear_line();
-    let _ = write!(&s.term, "\r{}", style.apply_to(&msg));
+    let style = Style::new().dim().cyan();
+    // Single write: clear line + content in one call, no separate flush
+    let line = format!("\x1b[2K\r{}", style.apply_to(&content));
+    let _ = write!(&s.term, "{}", line);
     let _ = s.term.flush();
 }
 
 /// Finalize the progress line with final stats, replacing the live line.
+/// TTY-aware: uses ANSI escape on TTY, plain line on non-TTY.
 pub fn transfer_done(transferred: u64, elapsed_secs: f64) {
     let s = state();
     if s.verbosity == Verbosity::Quiet {
@@ -211,15 +246,20 @@ pub fn transfer_done(transferred: u64, elapsed_secs: f64) {
     } else {
         0
     };
-    let style = Style::new().dim().cyan();
-    let msg = format!(
+    let content = format!(
         "    {} transferred in {:.1}s ({}/s)",
         format_bytes(transferred),
         elapsed_secs,
         format_bytes(avg_speed),
     );
-    let _ = s.term.clear_line();
-    let _ = s.term.write_line(&format!("\r{}", style.apply_to(&msg)));
+
+    if s.is_tty {
+        let style = Style::new().dim().cyan();
+        let line = format!("\x1b[2K\r{}", style.apply_to(&content));
+        let _ = s.term.write_line(&line);
+    } else {
+        let _ = s.term.write_line(&content);
+    }
 }
 
 /// Format a `Command` into a display string

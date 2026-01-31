@@ -1,5 +1,6 @@
 use crate::error::BackupError;
 use crate::ui;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -132,7 +133,85 @@ pub fn receive_subvolume_process(dest_dir: &Path) -> Result<std::process::Child,
     Ok(child)
 }
 
-/// Send a subvolume directly to a receive process via pipe
+/// Best-effort enlargement of a pipe buffer via `fcntl(F_SETPIPE_SZ)`.
+/// Silently ignores errors (e.g. unprivileged limit below requested size).
+fn try_set_pipe_size(fd: std::os::unix::io::RawFd, size: i32) {
+    unsafe {
+        libc::fcntl(fd, libc::F_SETPIPE_SZ, size);
+    }
+}
+
+const PIPE_BUF_SIZE: usize = 1024 * 1024; // 1 MiB
+
+/// Zero-copy transfer between two pipe fds using `splice(2)`.
+/// Calls `cb(total_bytes)` after each successful splice.
+/// Returns total bytes transferred, or an error.
+fn splice_transfer(
+    stdout: &std::process::ChildStdout,
+    stdin: &std::process::ChildStdin,
+    mut cb: impl FnMut(u64),
+) -> std::io::Result<u64> {
+    let fd_in = stdout.as_raw_fd();
+    let fd_out = stdin.as_raw_fd();
+
+    try_set_pipe_size(fd_in, PIPE_BUF_SIZE as i32);
+    try_set_pipe_size(fd_out, PIPE_BUF_SIZE as i32);
+
+    let mut total: u64 = 0;
+    loop {
+        let n = unsafe {
+            libc::splice(
+                fd_in,
+                std::ptr::null_mut(),
+                fd_out,
+                std::ptr::null_mut(),
+                PIPE_BUF_SIZE,
+                libc::SPLICE_F_MOVE,
+            )
+        };
+        if n > 0 {
+            total += n as u64;
+            cb(total);
+        } else if n == 0 {
+            // EOF
+            break;
+        } else {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EINTR) | Some(libc::EAGAIN) => continue,
+                _ => return Err(err),
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Fallback userspace copy between pipe fds.
+/// Uses a 1 MiB buffer with direct read/write_all (no BufReader/BufWriter).
+fn copy_transfer(
+    stdout: &mut std::process::ChildStdout,
+    stdin: &mut std::process::ChildStdin,
+    mut cb: impl FnMut(u64),
+) -> std::io::Result<u64> {
+    use std::io::{Read, Write};
+
+    let mut buf = vec![0u8; PIPE_BUF_SIZE];
+    let mut total: u64 = 0;
+    loop {
+        let n = stdout.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        stdin.write_all(&buf[..n])?;
+        total += n as u64;
+        cb(total);
+    }
+    Ok(total)
+}
+
+/// Send a subvolume directly to a receive process via pipe.
+/// Uses `splice(2)` for zero-copy kernel-space transfer with fallback to
+/// userspace copy if splice returns `EINVAL`.
 pub fn send_and_receive_piped(
     source: &Path,
     parent: Option<&Path>,
@@ -150,53 +229,36 @@ pub fn send_and_receive_piped(
     let mut recv_child = receive_subvolume_process(dest_dir)?;
 
     // Get stdout from send and stdin to receive
-    let send_stdout = send_child
+    let mut send_stdout = send_child
         .stdout
         .take()
         .ok_or_else(|| BackupError::Btrfs("Failed to get stdout from send process".to_string()))?;
 
-    let recv_stdin = recv_child
+    let mut recv_stdin = recv_child
         .stdin
         .take()
         .ok_or_else(|| BackupError::Btrfs("Failed to get stdin for receive process".to_string()))?;
 
-    // Pipe the data with progress tracking
-    {
-        use std::io::{Read, Write};
-        use std::time::Instant;
+    let start = std::time::Instant::now();
+    let progress = |total: u64| ui::transfer_progress(total, &start);
 
-        let mut reader = std::io::BufReader::new(send_stdout);
-        let mut writer = std::io::BufWriter::new(recv_stdin);
-        let mut buf = [0u8; 256 * 1024];
-        let mut total_bytes: u64 = 0;
-        let start = Instant::now();
-        let mut last_update = start;
-
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            writer.write_all(&buf[..n])?;
-            total_bytes += n as u64;
-
-            let now = Instant::now();
-            if now.duration_since(last_update).as_millis() >= 500 {
-                let elapsed = now.duration_since(start).as_secs_f64();
-                let speed = if elapsed > 0.0 {
-                    (total_bytes as f64 / elapsed) as u64
-                } else {
-                    0
-                };
-                ui::transfer_progress(total_bytes, speed);
-                last_update = now;
-            }
+    // Try splice (zero-copy), fall back to userspace copy on EINVAL
+    let total_bytes = match splice_transfer(&send_stdout, &recv_stdin, progress) {
+        Ok(total) => total,
+        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
+            copy_transfer(&mut send_stdout, &mut recv_stdin, |total| {
+                ui::transfer_progress(total, &start);
+            })?
         }
-        writer.flush()?;
+        Err(e) => return Err(BackupError::Io(e)),
+    };
 
-        let elapsed = start.elapsed().as_secs_f64();
-        ui::transfer_done(total_bytes, elapsed);
-    }
+    let elapsed = start.elapsed().as_secs_f64();
+    ui::transfer_done(total_bytes, elapsed);
+
+    // Explicitly close stdin so receive process sees EOF
+    drop(recv_stdin);
+    drop(send_stdout);
 
     // Wait for both processes
     let send_output = send_child.wait_with_output()?;

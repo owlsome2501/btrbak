@@ -1,6 +1,6 @@
 use anyhow;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use toml;
 
 use crate::btrfs;
@@ -179,7 +179,7 @@ fn default_true() -> bool {
 
 impl Config {
     /// Load configuration from a TOML file
-    pub fn from_file(path: &PathBuf) -> anyhow::Result<Self> {
+    pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config = toml::from_str(&content)?;
         Ok(config)

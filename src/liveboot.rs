@@ -40,7 +40,7 @@ pub fn prepare_live_boot(
 /// Initialize systemd-boot on ESP
 fn init_systemd_boot(esp_path: &Path) -> Result<(), BackupError> {
     let output = Command::new("bootctl")
-        .arg("--path")
+        .arg("--esp-path")
         .arg(esp_path)
         .arg("install")
         .output()?;
@@ -66,10 +66,20 @@ fn create_boot_entry(
 ) -> Result<(), BackupError> {
     // Determine root device and subvolume
     let root_device = find_btrfs_device(btrfs_mount)?;
-    let subvolume_path = live_root_subvolume.to_string();
+    // The root filesystem is at <live_root_subvolume>/root_vol (e.g. @/root_vol)
+    let subvolume_path = format!("{}/root_vol", live_root_subvolume);
 
-    // Build kernel command line options
-    let mut options = entry_config.options.clone();
+    // Filter user options to avoid duplicating root=, rootflags=, and rw
+    let mut options: Vec<String> = entry_config
+        .options
+        .iter()
+        .filter(|opt| {
+            !opt.starts_with("root=")
+                && !opt.starts_with("rootflags=")
+                && *opt != "rw"
+        })
+        .cloned()
+        .collect();
     options.push(format!("root=UUID={}", root_device));
     options.push(format!("rootflags=subvol={}", subvolume_path));
     options.push("rw".to_string());
@@ -125,16 +135,3 @@ fn find_btrfs_device(mount_point: &Path) -> Result<String, BackupError> {
     Ok(uuid)
 }
 
-/// Update live boot root with a new snapshot using safe atomic replacement
-pub fn update_live_root(
-    btrfs_mount: &Path,
-    snapshot_path: &Path,
-    live_root_subvolume: &str,
-) -> Result<(), BackupError> {
-    let live_root_path = btrfs_mount.join(live_root_subvolume);
-
-    // Create read-write snapshot and replace with atomic renames
-    btrfs::snapshot_and_replace_safely(&live_root_path, snapshot_path, "old")?;
-
-    Ok(())
-}

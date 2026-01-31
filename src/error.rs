@@ -19,6 +19,9 @@ pub enum BackupError {
 
     #[error("Hook execution error: {0}")]
     Hook(String),
+
+    #[error("Lock error: {0}")]
+    Lock(String),
 }
 
 #[cfg(test)]
@@ -42,6 +45,9 @@ mod tests {
 
         let hook_error = BackupError::Hook("hook failed".to_string());
         assert!(hook_error.to_string().contains("Hook execution error"));
+
+        let lock_error = BackupError::Lock("lock failed".to_string());
+        assert!(lock_error.to_string().contains("Lock error"));
     }
 
     #[test]

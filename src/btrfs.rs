@@ -294,7 +294,15 @@ pub fn snapshot_and_replace_safely(
     }
 
     // Step 3: Rename new snapshot to target name
-    rename_subvolume(&new_path, target_path)?;
+    if let Err(e) = rename_subvolume(&new_path, target_path) {
+        // Restore the old subvolume from backup
+        if target_exists {
+            let _ = rename_subvolume(&old_backup_path, target_path);
+        }
+        // Clean up the new snapshot
+        let _ = delete_subvolume(&new_path);
+        return Err(e);
+    }
 
     // Step 4: If we had an old target and backup succeeded, delete the backup
     if target_exists {
@@ -387,12 +395,12 @@ pub fn send_and_replace_safely(
     }
 
     // Rename received subvolume to target name if needed
-    if needs_rename {
-        if let Err(e) = rename_subvolume(&received_path, &target_path) {
-            let _ = delete_subvolume(&received_path);
-            restore_renamed();
-            return Err(e);
-        }
+    if needs_rename
+        && let Err(e) = rename_subvolume(&received_path, &target_path)
+    {
+        let _ = delete_subvolume(&received_path);
+        restore_renamed();
+        return Err(e);
     }
 
     // Clean up backup subvolumes
@@ -447,6 +455,37 @@ pub fn move_and_replace_safely(
     }
 
     Ok(())
+}
+
+/// Convert a filesystem path to a valid subvolume name
+pub fn get_volume_name_from_path(path: &Path) -> String {
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            if s.is_empty() || s == "." || s == "/" {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .collect();
+
+    if components.is_empty() {
+        "root".to_string()
+    } else {
+        components.join("_")
+    }
+}
+
+/// Get the subvolume name with `_vol` suffix from a filesystem path
+pub fn get_subvolume_name_with_suffix(path: &Path) -> String {
+    let volume_name = get_volume_name_from_path(path);
+    if volume_name == "root" {
+        "root_vol".to_string()
+    } else {
+        format!("{}_vol", volume_name)
+    }
 }
 
 /// Check if a path is a btrfs filesystem

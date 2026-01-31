@@ -1,12 +1,15 @@
+use crate::btrfs;
 use crate::error::BackupError;
 use log;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str;
 
 /// Execute post-backup hooks
 pub fn run_hooks(
     live_root: &Path,
+    target_mount: &Path,
     esp_path: &Path,
     hook_config: &crate::config::HookConfig,
     boot_entry: &crate::config::BootEntryConfig,
@@ -17,7 +20,7 @@ pub fn run_hooks(
     }
 
     if hook_config.regenerate_fstab {
-        regenerate_fstab(live_root, config)?;
+        regenerate_fstab(live_root, target_mount, config)?;
     }
 
     if hook_config.remove_snapper_config {
@@ -108,31 +111,19 @@ fn copy_kernel_to_esp(
 }
 
 /// Regenerate fstab for live boot environment
-fn regenerate_fstab(live_root: &Path, config: &crate::config::Config) -> Result<(), BackupError> {
+fn regenerate_fstab(
+    live_root: &Path,
+    target_mount: &Path,
+    config: &crate::config::Config,
+) -> Result<(), BackupError> {
     log::info!("Regenerating fstab for live boot environment...");
 
     let fstab_path = live_root.join("etc/fstab");
     log::debug!("Target fstab path: {}", fstab_path.display());
 
-    // First, get current mount points
-    log::debug!("Querying current mount points...");
-    let output = Command::new("findmnt")
-        .arg("--json")
-        .arg("--output")
-        .arg("SOURCE,TARGET,FSTYPE,OPTIONS")
-        .output()?;
-
-    if !output.status.success() {
-        log::error!("Failed to query mount points");
-        return Err(BackupError::Hook(
-            "Failed to get current mount points".to_string(),
-        ));
-    }
-
-    // Parse JSON and generate fstab entries for btrfs subvolumes
-    // For simplicity, we'll generate a basic fstab with common entries
+    // Generate fstab entries
     log::info!("Generating fstab entries...");
-    let fstab_content = generate_basic_fstab(live_root, config);
+    let fstab_content = generate_basic_fstab(target_mount, config);
 
     // Backup old fstab if exists
     if fstab_path.exists() {
@@ -180,7 +171,7 @@ fn regenerate_fstab(live_root: &Path, config: &crate::config::Config) -> Result<
 }
 
 /// Generate a basic fstab for live boot environment
-fn generate_basic_fstab(live_root: &Path, config: &crate::config::Config) -> String {
+fn generate_basic_fstab(target_mount: &Path, config: &crate::config::Config) -> String {
     let mut lines = vec![
         "# /etc/fstab: static file system information.".to_string(),
         "#".to_string(),
@@ -192,14 +183,13 @@ fn generate_basic_fstab(live_root: &Path, config: &crate::config::Config) -> Str
         "".to_string(),
     ];
 
-    // Get root device UUID for all filesystems
-    let root_uuid = get_device_uuid(live_root).unwrap_or_else(|_| "...".to_string());
+    // Get root device UUID from the actual target mount point
+    let root_uuid = get_device_uuid(target_mount).unwrap_or_else(|_| "...".to_string());
 
     // Generate entries for each source directory
     // For live boot environment, mount subvolumes from @/<volume_name>
     for source in &config.sources {
-        // Get volume name from path
-        let volume_name = get_volume_name_from_path(&source.path);
+        let subvolume_name = btrfs::get_subvolume_name_with_suffix(&source.path);
 
         // Determine mount point (use source path)
         let mount_point = if source.path == Path::new("/") {
@@ -209,12 +199,6 @@ fn generate_basic_fstab(live_root: &Path, config: &crate::config::Config) -> Str
         };
 
         // Determine subvolume path - mount from @/<volume_name> in live boot environment
-        // Add '_vol' suffix to match README layout convention
-        let subvolume_name = if volume_name == "root" {
-            "root_vol".to_string()
-        } else {
-            format!("{}_vol", volume_name)
-        };
         let subvolume_path = format!("@/{}", subvolume_name);
 
         lines.push(format!(
@@ -228,41 +212,11 @@ fn generate_basic_fstab(live_root: &Path, config: &crate::config::Config) -> Str
         lines.push("".to_string());
     }
 
-    // ESP partition (if exists in live_root/efi)
-    let efi_path = live_root.join("efi");
-    if efi_path.exists() {
-        // Try to get UUID of the mounted ESP device
-        let esp_uuid = get_device_uuid(&efi_path).unwrap_or_else(|_| "...".to_string());
-        lines.push("# EFI System Partition".to_string());
-        lines.push(format!(
-            "UUID={} /efi vfat rw,relatime,fmask=0133,dmask=0022 0 2",
-            esp_uuid
-        ));
-        lines.push("".to_string());
-    }
-
-    // Swap (if exists)
-    let swap_path = live_root.join("swap");
-    if swap_path.exists() {
-        // Check if swap is a file or partition
-        let swap_entry = if swap_path.is_file() {
-            "# Swap file".to_string()
-        } else {
-            "# Swap partition".to_string()
-        };
-        lines.push(swap_entry);
-        lines.push("# /swap/swapfile none swap defaults 0 0".to_string());
-        lines.push("".to_string());
-    }
-
     lines.join("\n")
 }
 
 /// Get UUID of device mounted at a path
 fn get_device_uuid(mount_point: &Path) -> Result<String, BackupError> {
-    use std::process::Command;
-    use std::str;
-
     // Use findmnt to get device UUID
     let output = Command::new("findmnt")
         .arg("--mountpoint")
@@ -329,24 +283,3 @@ fn remove_snapper_config(live_root: &Path) -> Result<(), BackupError> {
     Ok(())
 }
 
-/// Convert a filesystem path to a valid subvolume name
-/// Same implementation as in backup.rs
-fn get_volume_name_from_path(path: &Path) -> String {
-    let components: Vec<String> = path
-        .components()
-        .filter_map(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            if s.is_empty() || s == "." || s == "/" {
-                None
-            } else {
-                Some(s.to_string())
-            }
-        })
-        .collect();
-
-    if components.is_empty() {
-        "root".to_string()
-    } else {
-        components.join("_")
-    }
-}

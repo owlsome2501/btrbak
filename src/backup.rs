@@ -8,6 +8,7 @@ use fs4::fs_std::FileExt;
 use log;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// File-based lock to prevent concurrent runs with same config name
 struct ConfigLock {
@@ -18,19 +19,19 @@ impl ConfigLock {
     fn acquire(config_name: &str) -> Result<Self, BackupError> {
         let lock_parent = std::env::temp_dir().join("btrbak_locks");
         fs::create_dir_all(&lock_parent).map_err(|e| {
-            BackupError::Btrfs(format!("Failed to create lock parent directory: {}", e))
+            BackupError::Lock(format!("Failed to create lock parent directory: {}", e))
         })?;
 
         let lock_path = lock_parent.join(format!("{}.lock", config_name));
         let lock_file = File::create(&lock_path)
-            .map_err(|e| BackupError::Btrfs(format!("Failed to create lock file: {}", e)))?;
+            .map_err(|e| BackupError::Lock(format!("Failed to create lock file: {}", e)))?;
 
         // Try to acquire exclusive lock (non-blocking)
         match lock_file.try_lock_exclusive() {
             Ok(_) => Ok(Self {
                 _lock_file: lock_file,
             }),
-            Err(_) => Err(BackupError::Btrfs(format!(
+            Err(_) => Err(BackupError::Lock(format!(
                 "Another btrbak instance is already running with config name '{}'",
                 config_name
             ))),
@@ -39,7 +40,7 @@ impl ConfigLock {
 }
 
 /// Main backup procedure
-pub fn run_backup(config_path: &PathBuf, dry_run: bool) -> Result<(), BackupError> {
+pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> {
     let config = Config::from_file(config_path)?;
     config.validate()?;
 
@@ -259,13 +260,13 @@ fn create_snapper_snapshot(
     source: &SourceConfig,
     target_config_name: &str,
 ) -> Result<String, BackupError> {
-    use std::process::Command;
-
     // snapper_config must be set when use_snapper is true (validated in config)
-    let config_name = source
-        .snapper_config
-        .as_ref()
-        .expect("snapper_config must be set when use_snapper is true");
+    let config_name = source.snapper_config.as_ref().ok_or_else(|| {
+        BackupError::Config(anyhow::anyhow!(
+            "snapper_config must be set when use_snapper is true for source: {}",
+            source.path.display()
+        ))
+    })?;
 
     // Run snapper create command with single type and btrbak description
     let description = format!("btrbak_{}", target_config_name);
@@ -308,18 +309,18 @@ fn find_previous_snapper_snapshot(
     snapshot_dir: &Path,
     target_config_name: &str,
 ) -> Result<Option<PathBuf>, BackupError> {
-    use std::process::Command;
-
     // snapper_config must be set when use_snapper is true (validated in config)
-    let config_name = source
-        .snapper_config
-        .as_ref()
-        .expect("snapper_config must be set when use_snapper is true");
+    let config_name = source.snapper_config.as_ref().ok_or_else(|| {
+        BackupError::Config(anyhow::anyhow!(
+            "snapper_config must be set when use_snapper is true for source: {}",
+            source.path.display()
+        ))
+    })?;
 
     // Get snapper list
     let output = Command::new("snapper")
         .arg("-c")
-        .arg(&config_name)
+        .arg(config_name)
         .arg("list")
         .arg("--columns")
         .arg("number,description,type")
@@ -389,27 +390,6 @@ fn find_previous_snapper_snapshot(
     }
 }
 
-/// Convert a filesystem path to a valid subvolume name
-fn get_volume_name_from_path(path: &Path) -> String {
-    let components: Vec<String> = path
-        .components()
-        .filter_map(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            if s.is_empty() || s == "." || s == "/" {
-                None
-            } else {
-                Some(s.to_string())
-            }
-        })
-        .collect();
-
-    if components.is_empty() {
-        "root".to_string()
-    } else {
-        components.join("_")
-    }
-}
-
 /// Send snapshot to target
 fn send_snapshot(
     source: &SourceConfig,
@@ -419,14 +399,7 @@ fn send_snapshot(
     target_mount: &Path,
 ) -> Result<(), BackupError> {
     // Determine target volume name and parent directory
-    let volume_name = get_volume_name_from_path(&source.path);
-
-    // Add '_vol' suffix to match README layout convention
-    let subvolume_name = if volume_name == "root" {
-        "root_vol".to_string()
-    } else {
-        format!("{}_vol", volume_name)
-    };
+    let subvolume_name = btrfs::get_subvolume_name_with_suffix(&source.path);
 
     let (target_parent_dir, target_subvol_name) = if target_config.enable_live_boot {
         let parent = target_mount.join("@snapshots");
@@ -470,34 +443,31 @@ fn update_live_environment(config: &Config, target_mount: &Path) -> Result<(), B
 
         // Update each source in live boot environment
         for source in &config.sources {
-            let volume_name = get_volume_name_from_path(&source.path);
-
-            // Determine subvolume name with '_vol' suffix
-            let subvolume_name = if volume_name == "root" {
-                "root_vol".to_string()
-            } else {
-                format!("{}_vol", volume_name)
-            };
+            let subvolume_name = btrfs::get_subvolume_name_with_suffix(&source.path);
 
             log::info!(
-                "Processing source: {} (volume: {}, subvolume: {})",
+                "Processing source: {} (subvolume: {})",
                 source.path.display(),
-                volume_name,
                 subvolume_name
             );
 
-            let snapshot_dir = target_mount.join("@snapshots").join(&subvolume_name);
-            let latest_snapshot = btrfs::find_latest_snapshot(&snapshot_dir)?;
+            let snapshot_path = target_mount.join("@snapshots").join(&subvolume_name);
 
-            if let Some(snapshot) = latest_snapshot {
+            if btrfs::is_subvolume(&snapshot_path)? {
                 log::info!(
                     "Updating subvolume {} in live boot environment",
                     subvolume_name
                 );
-                update_live_subvolume(&live_root_path, &snapshot, &subvolume_name)?;
+                update_live_subvolume(&live_root_path, &snapshot_path, &subvolume_name)?;
 
                 log::info!(
                     "Live boot environment updated for {}",
+                    source.path.display()
+                );
+            } else {
+                log::warn!(
+                    "Snapshot subvolume not found at {}, skipping live update for {}",
+                    snapshot_path.display(),
                     source.path.display()
                 );
             }
@@ -506,6 +476,7 @@ fn update_live_environment(config: &Config, target_mount: &Path) -> Result<(), B
         // Run hooks after all sources are updated
         hooks::run_hooks(
             &live_root_path,
+            target_mount,
             &live_boot_config.esp_path,
             &config.hooks,
             &live_boot_config.boot_entry,
@@ -524,8 +495,6 @@ fn update_live_subvolume(
     snapshot: &Path,
     volume_name: &str,
 ) -> Result<(), BackupError> {
-    use crate::btrfs;
-
     let target_subvolume = live_root.join(volume_name);
 
     // Create read-write snapshot and replace with atomic renames
@@ -560,18 +529,18 @@ fn cleanup_old_snapper_snapshots(
     source: &SourceConfig,
     target_config_name: &str,
 ) -> Result<(), BackupError> {
-    use std::process::Command;
-
     // snapper_config must be set when use_snapper is true (validated in config)
-    let config_name = source
-        .snapper_config
-        .as_ref()
-        .expect("snapper_config must be set when use_snapper is true");
+    let config_name = source.snapper_config.as_ref().ok_or_else(|| {
+        BackupError::Config(anyhow::anyhow!(
+            "snapper_config must be set when use_snapper is true for source: {}",
+            source.path.display()
+        ))
+    })?;
 
     // Get snapper list
     let output = Command::new("snapper")
         .arg("-c")
-        .arg(&config_name)
+        .arg(config_name)
         .arg("list")
         .arg("--columns")
         .arg("number,description,type")
@@ -621,7 +590,7 @@ fn cleanup_old_snapper_snapshots(
 
         let output = Command::new("snapper")
             .arg("-c")
-            .arg(&config_name)
+            .arg(config_name)
             .arg("delete")
             .arg(snapshot_id.to_string())
             .output()?;
@@ -640,7 +609,7 @@ fn cleanup_old_snapper_snapshots(
 }
 
 /// Prepare live boot environment (initial setup)
-pub fn prepare_live_environment(config_path: &PathBuf) -> Result<(), BackupError> {
+pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
     let config = Config::from_file(config_path)?;
     config.validate()?;
 

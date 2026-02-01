@@ -90,17 +90,21 @@ fn create_boot_entry(
     options.push(format!("rootflags=subvol={}", subvolume_path));
     options.push("rw".to_string());
 
-    // Create entry file content
-    let entry_content = format!(
-        "title   {}\n\
-         linux   {}\n\
-         initrd  {}\n\
-         options {}\n",
-        entry_config.title,
-        entry_config.kernel.display(),
-        entry_config.initramfs.display(),
-        options.join(" ")
-    );
+    // Build entry file content
+    let mut entry_lines = vec![
+        format!("title   {}", entry_config.title),
+        format!("linux   {}", entry_config.kernel.display()),
+    ];
+
+    // Add microcode initrd before main initramfs (required for CPU microcode loading)
+    if let Some(microcode) = &entry_config.microcode {
+        entry_lines.push(format!("initrd  {}", microcode.display()));
+    }
+
+    entry_lines.push(format!("initrd  {}", entry_config.initramfs.display()));
+    entry_lines.push(format!("options {}", options.join(" ")));
+
+    let entry_content = format!("{}\n", entry_lines.join("\n"));
 
     // Write entry file
     let entries_dir = esp_path.join("loader/entries");

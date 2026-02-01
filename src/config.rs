@@ -143,6 +143,9 @@ pub struct BootEntryConfig {
     /// Initramfs path (relative to live boot root)
     #[serde(default = "default_initramfs")]
     pub initramfs: PathBuf,
+    /// Microcode image path (e.g. /boot/amd-ucode.img or /boot/intel-ucode.img)
+    #[serde(default)]
+    pub microcode: Option<PathBuf>,
     /// Additional kernel command line options
     #[serde(default)]
     pub options: Vec<String>,

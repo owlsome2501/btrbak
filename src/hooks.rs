@@ -6,6 +6,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str;
 
+/// Determine the root filesystem path within the live boot environment.
+/// The root filesystem is at `<live_root>/<root_vol>` (e.g. `@/root_vol`).
+fn find_root_vol_path(live_root: &Path, config: &crate::config::Config) -> PathBuf {
+    for source in &config.sources {
+        if source.path == Path::new("/") {
+            let vol_name = btrfs::get_subvolume_name_with_suffix(&source.path);
+            return live_root.join(vol_name);
+        }
+    }
+    // Fallback if no source has path "/"
+    live_root.join("root_vol")
+}
+
 /// Execute post-backup hooks
 pub fn run_hooks(
     live_root: &Path,
@@ -15,33 +28,38 @@ pub fn run_hooks(
     boot_entry: &crate::config::BootEntryConfig,
     config: &crate::config::Config,
 ) -> Result<(), BackupError> {
+    // All hooks that access root filesystem files need the root_vol path,
+    // not the live root directly. The live root (@) contains subvolumes
+    // like root_vol, home_vol, etc. The actual root filesystem is root_vol.
+    let root_vol_path = find_root_vol_path(live_root, config);
+
     if hook_config.copy_kernel {
         ui::substep("Copying kernel and initramfs to ESP");
-        copy_kernel_to_esp(live_root, esp_path, boot_entry)?;
+        copy_kernel_to_esp(&root_vol_path, esp_path, boot_entry)?;
     }
 
     if hook_config.regenerate_fstab {
         ui::substep("Regenerating fstab for live boot");
-        regenerate_fstab(live_root, target_mount, config)?;
+        regenerate_fstab(&root_vol_path, target_mount, esp_path, config)?;
     }
 
     if hook_config.remove_snapper_config {
         ui::substep("Removing snapper config from live boot");
-        remove_snapper_config(live_root)?;
+        remove_snapper_config(&root_vol_path)?;
     }
 
     Ok(())
 }
 
-/// Copy kernel and initramfs from live boot root to ESP
+/// Copy kernel, initramfs, and microcode from live boot root volume to ESP
 fn copy_kernel_to_esp(
-    live_root: &Path,
+    root_vol: &Path,
     esp_path: &Path,
     boot_entry: &crate::config::BootEntryConfig,
 ) -> Result<(), BackupError> {
-    // Helper to convert absolute path to relative path within live_root
-    fn to_live_root_path(live_root: &Path, path: &Path) -> PathBuf {
-        let mut result = live_root.to_path_buf();
+    // Helper to convert absolute path to relative path within root_vol
+    fn to_root_vol_path(root_vol: &Path, path: &Path) -> PathBuf {
+        let mut result = root_vol.to_path_buf();
         // Strip leading '/' if present
         for component in path.components() {
             match component {
@@ -52,8 +70,8 @@ fn copy_kernel_to_esp(
         result
     }
 
-    let kernel_source = to_live_root_path(live_root, &boot_entry.kernel);
-    let initramfs_source = to_live_root_path(live_root, &boot_entry.initramfs);
+    let kernel_source = to_root_vol_path(root_vol, &boot_entry.kernel);
+    let initramfs_source = to_root_vol_path(root_vol, &boot_entry.initramfs);
 
     // Fallback initramfs pattern: replace ".img" with "-fallback.img"
     let initramfs_fallback_source = if let Some(parent) = boot_entry.initramfs.parent() {
@@ -64,10 +82,9 @@ fn copy_kernel_to_esp(
             stem.to_string_lossy(),
             extension.to_string_lossy()
         );
-        to_live_root_path(live_root, &parent.join(fallback_name))
+        to_root_vol_path(root_vol, &parent.join(fallback_name))
     } else {
-        // Fallback to default path if no parent
-        live_root.join("boot/initramfs-linux-fallback.img")
+        root_vol.join("boot/initramfs-linux-fallback.img")
     };
 
     // Destination filenames use the source filename (not full path)
@@ -110,23 +127,41 @@ fn copy_kernel_to_esp(
         ));
     }
 
+    // Copy microcode image if configured
+    if let Some(microcode) = &boot_entry.microcode {
+        let ucode_source = to_root_vol_path(root_vol, microcode);
+        let ucode_dest = esp_path.join(ucode_source.file_name().unwrap_or_default());
+
+        if ucode_source.exists() {
+            fs::copy(&ucode_source, &ucode_dest)?;
+            ui::detail(&format!(
+                "Copied microcode: {} -> {}",
+                ucode_source.display(),
+                ucode_dest.display()
+            ));
+        } else {
+            ui::warning(&format!("Microcode not found at: {}", ucode_source.display()));
+        }
+    }
+
     Ok(())
 }
 
 /// Regenerate fstab for live boot environment
 fn regenerate_fstab(
-    live_root: &Path,
+    root_vol: &Path,
     target_mount: &Path,
+    esp_path: &Path,
     config: &crate::config::Config,
 ) -> Result<(), BackupError> {
-    let fstab_path = live_root.join("etc/fstab");
+    let fstab_path = root_vol.join("etc/fstab");
 
     // Generate fstab entries
-    let fstab_content = generate_basic_fstab(target_mount, config);
+    let fstab_content = generate_basic_fstab(root_vol, target_mount, esp_path, config);
 
     // Backup old fstab if exists
     if fstab_path.exists() {
-        let backup_path = fstab_path.with_extension("fstab.backup");
+        let backup_path = fstab_path.with_extension("backup");
         ui::detail(&format!("Backing up existing fstab to: {}", backup_path.display()));
         fs::copy(&fstab_path, &backup_path)?;
     }
@@ -153,7 +188,12 @@ fn regenerate_fstab(
 }
 
 /// Generate a basic fstab for live boot environment
-fn generate_basic_fstab(target_mount: &Path, config: &crate::config::Config) -> String {
+fn generate_basic_fstab(
+    root_vol: &Path,
+    target_mount: &Path,
+    esp_path: &Path,
+    config: &crate::config::Config,
+) -> String {
     let mut lines = vec![
         "# /etc/fstab: static file system information.".to_string(),
         "#".to_string(),
@@ -161,12 +201,13 @@ fn generate_basic_fstab(target_mount: &Path, config: &crate::config::Config) -> 
         "# device; this may be used with UUID= as a more robust way to name devices".to_string(),
         "# that works even if disks are added and removed. See fstab(5).".to_string(),
         "#".to_string(),
-        "# <file system>             <mount point>  <type>  <options>  <dump>  <pass>".to_string(),
+        "# <file system> <dir> <type> <options> <dump> <pass>".to_string(),
         "".to_string(),
     ];
 
     // Get root device UUID from the actual target mount point
     let root_uuid = get_device_uuid(target_mount).unwrap_or_else(|_| "...".to_string());
+    let btrfs_opts = "rw,relatime,ssd,compress-force=zstd,space_cache=v2";
 
     // Generate entries for each source directory
     // For live boot environment, mount subvolumes from @/<volume_name>
@@ -184,15 +225,28 @@ fn generate_basic_fstab(target_mount: &Path, config: &crate::config::Config) -> 
         let subvolume_path = format!("@/{}", subvolume_name);
 
         lines.push(format!(
-            "# Live boot subvolume for: {}",
-            source.path.display()
+            "UUID={}  {}  btrfs  {},subvol={}  0 0",
+            root_uuid, mount_point, btrfs_opts, subvolume_path
         ));
-        lines.push(format!(
-            "UUID={} {} btrfs rw,relatime,ssd,compress=zstd,space_cache=v2,subvol={} 0 0",
-            root_uuid, mount_point, subvolume_path
-        ));
-        lines.push("".to_string());
     }
+    lines.push("".to_string());
+
+    // Add ESP mount entry if /efi directory exists in root volume
+    let efi_dir = root_vol.join("efi");
+    if efi_dir.exists() {
+        if let Ok(esp_uuid) = get_device_uuid(esp_path) {
+            lines.push(format!(
+                "UUID={}  /efi  vfat  rw,relatime,fmask=0133,dmask=0022,codepage=437,iocharset=iso8859-1,shortname=mixed,utf8,errors=remount-ro  0 2",
+                esp_uuid
+            ));
+        } else {
+            ui::warning("Could not determine ESP UUID, skipping ESP fstab entry");
+        }
+    }
+
+    // Add tmpfs for /tmp
+    lines.push("tmpfs  /tmp  tmpfs  nodev,nosuid  0 0".to_string());
+    lines.push("".to_string());
 
     lines.join("\n")
 }

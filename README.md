@@ -12,13 +12,6 @@ A Rust tool for creating incremental Btrfs backups of multiple directories with 
 - **LUKS encryption** - Secure offsite backups with optional encryption
 - **Snapper integration** - Works with existing snapper configurations
 
-## Key Features
-
-- 🔄 **Multi-source incremental backups** - Backup multiple directories simultaneously with efficient data transfer
-- 🔒 **Optional LUKS encryption** - Secure backup storage with keyfile or environment variable auth
-- 🚀 **Live boot environments** - Create bootable backup systems for disaster recovery
-- 🔌 **Snapper integration** - Leverage existing snapper configurations for system directories
-
 ## Quick Start
 
 ### Installation
@@ -35,323 +28,179 @@ cargo build --release
 make release
 ```
 
-### Basic Configuration
+### Minimal Configuration
 
-Create a configuration file `btrbak.toml`:
+Create `btrbak.toml` (see the shipped [`btrbak.toml`](btrbak.toml) for a fully
+annotated reference with every field):
 
 ```toml
-# Backup multiple source directories simultaneously
-[[sources]]
-path = "/"                    # Root filesystem
-snapshot_dir = ".snapshots"   # Local snapshot directory
-use_snapper = false           # Use manual snapshot method
-snapshot_name = "btrbak" # Name for manual snapshots
+name = "default"
 
 [[sources]]
-path = "/home"                # User home directories
-snapshot_dir = ".snapshots"
-use_snapper = false
-snapshot_name = "btrbak"
+path = "/"
 
-# Optional: backup system directories
-# [[sources]]
-# path = "/var"
-# snapshot_dir = ".snapshots"
-# use_snapper = true           # Use snapper for system directories
-# snapper_config = "var"       # Snapper config name
+[[sources]]
+path = "/home"
 
 [target]
-location = "/mnt/backup"      # Backup destination
-enable_live_boot = false      # Disable live boot environment
-
-[hooks]
-copy_kernel = true            # Copy kernel to ESP after backup
-regenerate_fstab = true       # Update fstab in live environment
-remove_snapper_config = true  # Clean up snapper configs
+location = "/mnt/backup"
 ```
 
 ### Running Backups
 
 ```bash
-# Validate your configuration (dry-run check)
-btrbak validate
-
-# Run a backup
-btrbak backup
-
-# Run a dry-run backup (no changes made)
-btrbak backup --dry-run
-
-# Prepare live boot environment (initial setup)
-btrbak prepare-live
-
-# Specify a custom config file (default: btrbak.toml)
-btrbak backup -c /path/to/config.toml
-
-# Verbose / quiet output
-btrbak -v backup    # show all details
-btrbak -q backup    # errors only
+btrbak validate                      # check configuration
+btrbak backup                        # run backup
+btrbak backup --dry-run              # dry-run (no changes)
+btrbak prepare-live                  # initialize live boot environment
+btrbak backup -c /path/to/config.toml  # custom config file
+btrbak -v backup                     # verbose output
+btrbak -q backup                     # errors only
 ```
 
-**Configuration Validation Tips:**
-- Always run `btrbak validate` before your first backup
-- Use `--dry-run` to test backup operations without making changes
-- Validation checks source paths, target accessibility, and configuration consistency
-- Fix any validation errors before proceeding with actual backups
+## Configuration Reference
 
-## Configuration Guide
+All available fields are documented below. Commented-out values in the tables
+indicate defaults. The shipped [`btrbak.toml`](btrbak.toml) contains the same
+information in a copy-pasteable TOML format.
 
-### Source Configuration
+### Top-level
 
-The source configuration defines what you're backing up.
-You can configure multiple source directories to backup simultaneously using the `[[sources]]` array syntax:
+| Field       | Required | Default    | Description                                                                                |
+| ----------- | -------- | ---------- | ------------------------------------------------------------------------------------------ |
+| `name`      | yes      | —          | Configuration name, used to distinguish different backup targets. Must be non-empty.       |
+| `sources`   | yes      | —          | Array of source subvolume entries (see below). Alias `source` (singular) is also accepted. |
+| `target`    | yes      | —          | Target backup location (see below).                                                        |
+| `live_boot` | no       | —          | Live boot environment configuration. Required when `target.enable_live_boot = true`.       |
+| `hooks`     | no       | all `true` | Post-backup hooks. Only effective when live boot is enabled.                               |
 
-```toml
-# Backup configuration for a source directory
-[[sources]]
-# Required: path to the Btrfs subvolume to backup (must be a valid subvolume)
-path = "/"
+### `[[sources]]` — source subvolumes
 
-# Optional: directory for local snapshots (relative to source path)
-# Default: ".snapshots"
-snapshot_dir = ".snapshots"
+At least one entry is required. Source paths are converted to target subvolume
+names automatically: `/` -> `root_vol`, `/home` -> `home_vol`,
+`/var/log` -> `var_log_vol`.
 
-# Optional: use snapper for snapshot management instead of manual method
-# Default: false
-use_snapper = false
+| Field            | Required                  | Default                     | Description                                                                           |
+| ---------------- | ------------------------- | --------------------------- | ------------------------------------------------------------------------------------- |
+| `path`           | yes                       | —                           | Absolute path to the btrfs subvolume to back up. Must be an existing btrfs subvolume. |
+| `snapshot_dir`   | no                        | `".snapshots"`              | Directory for local snapshots, relative to the source path.                           |
+| `use_snapper`    | no                        | `false`                     | Use snapper for snapshot management instead of manual creation.                       |
+| `snapshot_name`  | no                        | `"btrbak"`                  | Name of the manual snapshot subvolume. Ignored when `use_snapper = true`.             |
+| `snapper_config` | when `use_snapper = true` | inferred from path basename | Snapper configuration name.                                                           |
 
-# Optional: name for manual snapshots (ignored if use_snapper = true)
-# Default: "btrbak"
-snapshot_name = "btrbak"
+### `[target]` — backup destination
 
-# Optional: snapper configuration name (required if use_snapper = true)
-# If not specified, inferred from source path basename
-snapper_config = "root"
+| Field                 | Required | Default                                        | Description                                                                                                                                                                                       |
+| --------------------- | -------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `location`            | yes      | —                                              | Backup destination. Accepts a mounted path (`/mnt/backup`) or a device identifier (`/dev/sda1`, `UUID=...`, `LABEL=...`, `PARTUUID=...`). Device identifiers are automatically mounted/unmounted. |
+| `enable_live_boot`    | no       | `false`                                        | Enable live boot environment support. Requires a `[live_boot]` section.                                                                                                                           |
+| `snapshot_subvolume`  | no       | `"@snapshots"` (live boot) / `"."` (otherwise) | Subvolume name for storing backup snapshots on the target.                                                                                                                                        |
+| `live_boot_subvolume` | no       | `"@"`                                          | Subvolume name for the live boot root environment.                                                                                                                                                |
 
-# Add more [[sources]] sections for additional directories
-[[sources]]
-path = "/home"
-use_snapper = false
+### `[target.encryption]` — LUKS encryption (optional)
 
-[[sources]]
-path = "/var"
-use_snapper = true
-snapper_config = "var"  # Requires snapper config "var" to exist
+At least one of `keyfile` or `passphrase_env` must be provided.
+
+| Field            | Required | Default           | Description                                                               |
+| ---------------- | -------- | ----------------- | ------------------------------------------------------------------------- |
+| `keyfile`        | no       | —                 | Path to a LUKS keyfile. Should have restricted permissions (`chmod 600`). |
+| `passphrase_env` | no       | —                 | Name of an environment variable containing the LUKS passphrase.           |
+| `mapping_name`   | no       | `"backup_target"` | dm-crypt mapping name for the unlocked device.                            |
+
+### `[live_boot]` — live boot environment (optional)
+
+Required when `target.enable_live_boot = true`.
+
+| Field        | Required | Default         | Description                                                 |
+| ------------ | -------- | --------------- | ----------------------------------------------------------- |
+| `esp_path`   | yes      | —               | Path to the EFI System Partition (ESP). Must exist.         |
+| `bootloader` | no       | `"SystemdBoot"` | Bootloader type. Currently only `SystemdBoot` is supported. |
+
+### `[live_boot.boot_entry]` — bootloader entry
+
+| Field       | Required | Default                       | Description                                               |
+| ----------- | -------- | ----------------------------- | --------------------------------------------------------- |
+| `title`     | no       | `"Backup Environment"`        | Title displayed in the boot menu.                         |
+| `kernel`    | no       | `"/boot/vmlinuz-linux"`       | Kernel image path inside the live boot root subvolume.    |
+| `initramfs` | no       | `"/boot/initramfs-linux.img"` | Initramfs image path inside the live boot root subvolume. |
+| `microcode` | no       | —                             | CPU microcode image path (e.g. `"/boot/amd-ucode.img"`).  |
+| `options`   | no       | `[]`                          | Additional kernel command line options.                   |
+
+### `[hooks]` — post-backup hooks
+
+Hooks only run when `enable_live_boot = true` and a `[live_boot]` section is present.
+
+| Field                   | Required | Default | Description                                                                                           |
+| ----------------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------- |
+| `copy_kernel`           | no       | `true`  | Copy kernel, initramfs (and fallback) from the live root to the ESP.                                  |
+| `regenerate_fstab`      | no       | `true`  | Regenerate `/etc/fstab` in the live environment with correct UUIDs and subvolume mounts.              |
+| `remove_snapper_config` | no       | `true`  | Remove snapper configuration from the live environment to prevent it from modifying backup snapshots. |
+
+## How It Works
+
+### Backup Process
+
+For each configured source, the following pipeline is executed:
+
+1. **Validate** — load configuration, verify source paths are btrfs subvolumes, ensure target is accessible.
+2. **Snapshot** — create a read-only snapshot of the source (`manual` or `snapper` method).
+3. **Transfer** — pipe the snapshot to the target with `btrfs send | btrfs receive`. Incremental transfers use the previous snapshot as a parent.
+4. **Cleanup** — remove the old local snapshot, keeping only the latest for the next incremental run.
+
+```
+# First run (full):
+btrfs send /.snapshots/btrbak | btrfs receive /target/
+
+# Subsequent runs (incremental):
+btrfs send -p /.snapshots/btrbak_prev /.snapshots/btrbak | btrfs receive /target/
 ```
 
-**Source Configuration Notes:**
-1. **Volume Naming**: Source paths are converted to subvolume names with `_vol` suffix
-   - `/` → `root_vol`
-   - `/home` → `home_vol`
-   - `/var/log` → `var_log_vol`
-2. **Snapshot Storage**: Local snapshots are created in `source_path/snapshot_dir/`
-3. **Snapper Integration**: When enabled, uses snapper with "btrbak" description
-4. **Incremental Backups**: Preserves previous snapshot for next incremental backup
-
-**Requirements:**
-- Source must be a Btrfs subvolume (verified during validation)
-- The snapshot directory must exist or be creatable
-- For snapper integration, snapper must be properly configured with the specified config
-
-### Target Configuration
-
-The target configuration defines where backups are stored and how they're organized:
-
-```toml
-[target]
-# Required: backup destination - can be a mounted path or device identifier
-# Examples:
-#   "/mnt/backup" (already mounted filesystem)
-#   "/dev/sda1" (device path)
-#   "UUID=1234-5678" (device by UUID)
-#   "LABEL=backup_drive" (device by label)
-location = "/mnt/backup"
-
-# Optional: enable live boot environment creation
-# Default: false
-enable_live_boot = false
-
-# Optional: subvolume name for storing snapshots
-# Default: "@snapshots" if live boot enabled, "." (root subvolume) otherwise
-snapshot_subvolume = "@snapshots"
-
-# Optional: subvolume name for live boot environment
-# Default: "@"
-live_boot_subvolume = "@"
-
-# Optional: LUKS encryption configuration
-[target.encryption]
-# Optional: path to keyfile for automatic LUKS unlocking
-keyfile = "/path/to/luks/keyfile"
-
-# Optional: environment variable containing LUKS passphrase
-passphrase_env = "BACKUP_PASSPHRASE"
-
-# Optional: custom name for LUKS device mapping
-# Default: "backup_target"
-mapping_name = "custom_backup"
-```
-
-**Target Location Options:**
-
-1. **Mounted Path**: Already mounted Btrfs filesystem
-   ```toml
-   location = "/mnt/backup"
-   ```
-
-2. **Device Path**: Raw device (automatically mounted)
-   ```toml
-   location = "/dev/sda1"
-   ```
-
-3. **Device by UUID**: More stable identifier
-   ```toml
-   location = "UUID=12345678-1234-1234-1234-123456789012"
-   ```
-
-4. **Device by Label**: Human-readable identifier
-   ```toml
-   location = "LABEL=backup_drive"
-   ```
-
-**Encryption Notes:**
-- Provide either `keyfile` or `passphrase_env` (or both for fallback)
-- Keyfiles should have restricted permissions (`chmod 600`)
-- Environment variables are safer than hardcoded passphrases
-- The device is automatically mounted/unmounted during backup operations
+Each source is processed independently — a failure in one does not block the others.
 
 ### Live Boot Environment
 
-Create a bootable environment from your backups that can be used for system recovery:
+**Initial setup** (`btrbak prepare-live`):
 
-```toml
-[target]
-location = "/mnt/backup"
-enable_live_boot = true  # Required for live boot functionality
+1. Creates `@` (live root) and `@snapshots` (backup storage) subvolumes on the target.
+2. Initializes systemd-boot on the ESP.
+3. Creates a bootloader entry with the configured kernel parameters.
 
-# Live boot configuration (required when enable_live_boot = true)
-[live_boot]
-# Required: path to EFI System Partition (ESP)
-esp_path = "/mnt/efi"
+**Post-backup updates** (automatic after each backup):
 
-# Optional: bootloader type (currently only systemd-boot supported)
-# Default: SystemdBoot
-bootloader = "SystemdBoot"
+1. Atomically replaces each `@/<vol>` with the latest snapshot from `@snapshots/<vol>`.
+2. Runs hooks: copy kernel to ESP, regenerate fstab, remove snapper config.
 
-# Optional: bootloader entry configuration
-[live_boot.boot_entry]
-# Optional: title displayed in boot menu
-# Default: "Backup Environment"
-title = "Backup Environment"
+### File System Layout
 
-# Optional: kernel path (relative to live boot root vol)
-# Default: "/boot/vmlinuz-linux"
-kernel = "/boot/vmlinuz-linux"
+**Volume naming convention:**
 
-# Optional: initramfs path (relative to live boot root vol)
-# Default: "/boot/initramfs-linux.img"
-initramfs = "/boot/initramfs-linux.img"
+| Source Path | Target Subvolume Name |
+| ----------- | --------------------- |
+| `/`         | `root_vol`            |
+| `/home`     | `home_vol`            |
+| `/var`      | `var_vol`             |
+| `/var/log`  | `var_log_vol`         |
 
-# Optional: additional kernel command line options
-# Default: empty vector
-options = ["rw", "quiet", "rootflags=subvol=@/root_vol"]
-```
-
-**Live Boot Setup Process:**
-
-1. **Initial Preparation**: Run `btrbak prepare-live` once to:
-   - Create `@` and `@snapshots` subvolumes on target
-   - Initialize systemd-boot on the ESP
-   - Create bootloader entries
-
-2. **Post-Backup Updates**: After each backup:
-   - Live environment is updated with latest snapshots
-   - Hooks are executed (kernel copy, fstab regeneration, etc.)
-   - Bootable environment mirrors your latest backup state
-
-**Live Boot File System Layout:**
-```
-(btrfs top-level subvolume)
-├── @snapshots         # Read-only backup storage
-│   ├── root_vol       # Root filesystem backups
-│   ├── home_vol       # Home directory backups
-│   └── var_vol        # System directory backups
-└── @                  # Live boot environment (writable)
-    ├── root_vol       -> / (mounted at boot)
-    ├── home_vol       -> /home (mounted at boot)
-    └── var_vol        -> /var (mounted at boot)
-```
-
-
-
-### Hooks
-
-Post-backup automation for live boot environments:
-
-```toml
-[hooks]
-# Optional: copy kernel and initramfs to ESP after backup
-# Default: true
-copy_kernel = true
-
-# Optional: regenerate fstab with correct subvolume mounts
-# Default: true
-regenerate_fstab = true
-
-# Optional: remove snapper configuration from live environment
-# Default: true
-remove_snapper_config = true
-```
-
-**Hook Details:**
-
-1. **copy_kernel**: Copies kernel (`vmlinuz-*`) and initramfs (`initramfs-*.img`) from `root_vol/boot/` in the live boot environment to the ESP. Also copies fallback initramfs if available. This ensures the backup environment can boot with the same kernel as the source system.
-
-2. **regenerate_fstab**: Creates a new `/etc/fstab` in the live boot environment with:
-   - Correct UUID-based device identifiers for the Btrfs filesystem
-   - Proper subvolume mounts (`@/root_vol`, `@/home_vol`, etc.)
-   - ESP mount entry if `/efi` directory exists in the live environment
-
-3. **remove_snapper_config**: Cleans up snapper configuration from the live boot environment to prevent snapper from modifying backup snapshots.
-
-**Note**: Hooks only run when `enable_live_boot = true` and a live boot configuration is provided.
-
-## File System Layout
-
-Understanding the Btrfs subvolume naming and organization is crucial for effective backup management. `btrbak` uses consistent naming conventions across source and target systems.
-
-### Volume Naming Convention
-
-Source paths are converted to standardized subvolume names with `_vol` suffix:
-
-| Source Path | Subvolume Name | Description |
-|-------------|----------------|-------------|
-| `/` | `root_vol` | Root filesystem |
-| `/home` | `home_vol` | User home directories |
-| `/var` | `var_vol` | System variable data |
-| `/var/log` | `var_log_vol` | Nested paths use underscores |
-| `/opt/app` | `opt_app_vol` | Application directory |
-
-### Source Layout Requirements
+**Source layout layout without snapper:**
 
 Each source directory must have a location for local snapshots (default: `.snapshots` within the source).
 
-**Example source layout:**
 ```
 # Source filesystem (live system)
 /
-├── .snapshots/           # Local snapshot directory (for /)
-│   └── btrbak     # Read-only snapshot for backup
+├── .snapshots/            # Local snapshot directory (for /)
+│   └── btrbak-config-name # Read-only snapshot for backup
 ├── home/
 │   ├── user/
-│   └── .snapshots/      # Local snapshot directory (for /home)
-│       └── btrbak
+│   └── .snapshots/        # Local snapshot directory (for /home)
+│       └── btrbak-config-name
 └── var/
-    └── .snapshots/      # Local snapshot directory (for /var)
-        └── btrbak
+    └── .snapshots/        # Local snapshot directory (for /var)
+        └── btrbak-config-name
 ```
 
-**With snapper integration:**
+**Source layout layout with snapper integration:**
+
 ```
 /
 ├── .snapshots/
@@ -363,177 +212,57 @@ Each source directory must have a location for local snapshots (default: `.snaps
 └── ...
 ```
 
-### Target Layout
+**Target layout without live boot:**
 
-The target layout depends on whether live boot environment is enabled.
-
-**Without live boot environment (simple backup):**
 ```
-# Target filesystem (backup destination)
-/
-├── root_vol/            # Backups of /
-├── home_vol/            # Backups of /home
-└── var_vol/             # Backups of /var
+/                        (target btrfs root)
+├── root_vol/            backup of /
+├── home_vol/            backup of /home
+└── var_vol/             backup of /var
 ```
 
-**With live boot environment (bootable backup):**
+**Target layout with live boot:**
+
 ```
-# Target filesystem (backup destination with boot capability)
-/
-├── @snapshots/          # Read-only backup storage
-│   ├── root_vol/        # Root filesystem backups
-│   ├── home_vol/        # Home directory backups
-│   └── var_vol/         # System directory backups
-└── @/                   # Live boot environment (writable)
-    ├── root_vol -> /    # Mounted at boot as root
-    ├── home_vol -> /home # Mounted at boot as /home
-    └── var_vol -> /var  # Mounted at boot as /var
+/                        (target btrfs root)
+├── @snapshots/          read-only backup storage
+│   ├── root_vol/
+│   ├── home_vol/
+│   └── var_vol/
+└── @/                   live boot environment (writable)
+    ├── root_vol         mounted as / at boot
+    ├── home_vol         mounted as /home at boot
+    └── var_vol          mounted as /var at boot
 ```
 
-**ESP (EFI System Partition) layout:**
+**ESP layout:**
+
 ```
-# ESP is a separate FAT32 partition (typically mounted at /efi or /boot/efi)
-/efi/                    # ESP mount point
-├── EFI/
-│   └── systemd/        # systemd-boot files
-├── vmlinuz-linux       # Copied kernel from live environment
-├── initramfs-linux.img # Copied initramfs from live environment
-└── loader/             # Bootloader configuration
+/efi/
+├── EFI/systemd/         systemd-boot files
+├── vmlinuz-linux        kernel copied from live environment
+├── initramfs-linux.img  initramfs copied from live environment
+└── loader/
     ├── loader.conf
     └── entries/
-        └── backup.conf # Boot menu entry for backup environment
+        └── backup.conf  boot menu entry
 ```
-
-## How It Works
-
-`btrbak` performs parallel backup of multiple source directories with incremental transfers and optional live boot environment updates.
-
-### Multi-Source Backup Process
-
-For each configured source directory, the following steps are executed:
-
-**1. Configuration & Validation**
-- Load and validate TOML configuration
-- Ensure target device is accessible (mount if needed)
-- Verify all source paths are valid Btrfs subvolumes
-
-**2. Per-Source Backup Pipeline**
-Each source is processed independently with error isolation:
-
-```
-for each source in configuration.sources:
-  1. Create local snapshot (manual or via snapper)
-  2. Identify parent snapshot for incremental transfer
-  3. Send snapshot to target with btrfs send/receive
-  4. Clean up old local snapshots
-```
-
-**3. Local Snapshot Creation**
-- **Manual method**: Creates read-only snapshot at `source/.snapshots/btrbak`
-- **Snapper method**: Creates snapper snapshot with "btrbak" description
-- Preserves previous snapshot as parent for next incremental backup
-
-**4. Incremental Data Transfer**
-```
-# Full backup (first run):
-btrfs send /source/.snapshots/btrbak | btrfs receive /target/
-
-# Incremental backup (subsequent runs):
-btrfs send -p /source/.snapshots/btrbak_prev /source/.snapshots/btrbak | btrfs receive /target/
-```
-
-**5. Error Handling & Recovery**
-- One source failure doesn't stop other backups
-- Errors are collected and reported at the end
-- Failed sources can be retried independently
-
-### Live Boot Environment Management
-
-**Initial Setup (`prepare-live` command):**
-1. Creates `@` (live boot) and `@snapshots` (backup storage) subvolumes
-2. Initializes systemd-boot on the ESP partition
-3. Creates bootloader entry with correct kernel parameters
-
-**Post-Backup Updates:**
-1. **Subvolume Replacement**: Atomically replaces each `@/volume_vol` with latest snapshot from `@snapshots/volume_vol`
-2. **Hook Execution**:
-   - `copy_kernel`: Copies kernel/initramfs to ESP
-   - `regenerate_fstab`: Updates `/etc/fstab` with correct UUIDs and subvolume mounts
-   - `remove_snapper_config`: Prevents snapper from modifying backup environment
-3. **Boot Consistency**: Maintains bootable environment that mirrors latest backup state
-
-### Volume Naming & Organization
-
-The tool maintains consistent naming across source and target:
-
-```
-# Source (live system)
-/                     -> snapshot at /.snapshots/btrbak
-/home                 -> snapshot at /home/.snapshots/btrbak
-
-# Target (backup storage)
-@snapshots/root_vol   <- received snapshot of /
-@snapshots/home_vol   <- received snapshot of /home
-
-# Live boot environment
-@/root_vol            -> mounted as / at boot
-@/home_vol            -> mounted as /home at boot
-```
-
-## Architecture
-
-`btrbak` is built with reliability and safety as primary concerns, using modern Rust patterns and careful error handling.
-
-### Core Components
-
-**1. Configuration System**
-- Type-safe TOML parsing with serde
-- Runtime validation of paths, subvolumes, and dependencies
-- Sensible defaults with explicit overrides
-
-**2. Multi-Source Backup Engine**
-- Parallel-sequential processing: Sources processed in order with error isolation
-- Volume name normalization: Consistent `_vol` suffix naming
-- Snapshot method abstraction: Unified interface for manual and snapper snapshots
-
-**3. Device & Filesystem Management**
-- Unified device handling: Mounted paths, raw devices, UUID/LABEL identifiers
-- LUKS integration: Optional encryption with keyfile or environment variable
-- Btrfs operations: Safe wrappers around btrfs commands with proper error checking
-
-**4. Live Boot Environment**
-- Bootloader management: systemd-boot initialization and configuration
-- Atomic subvolume replacement: Safe updates of live environment
-- Hook system: Extensible post-backup automation
-
-**5. Hook System**
-- Pluggable design: Easy to add new post-backup operations
-- Conditional execution: Hooks only run when live boot is enabled
-- Safe execution: Hook failures don't roll back successful backups
-
-### Design Principles
-
-1. **Explicit over implicit**: Configuration requires explicit enabling of features
-2. **Safe defaults**: Operations default to safe, non-destructive behavior
-3. **Comprehensive validation**: Validate early and often, fail fast
-4. **Clean resource management**: RAII patterns for all external resources
-5. **Informative errors**: Clear error messages with context and recovery suggestions
 
 ## Testing
 
 A `Makefile` is provided for common tasks:
 
 ```bash
-make build           # cargo build
-make release         # cargo build --release
-make check           # cargo check
-make clippy          # cargo clippy -- -D warnings
-make fmt             # cargo fmt
-make fmt-check       # cargo fmt -- --check
-make test            # unit tests (no root required)
+make build             # cargo build
+make release           # cargo build --release
+make check             # cargo check
+make clippy            # cargo clippy -- -D warnings
+make fmt               # cargo fmt
+make fmt-check         # cargo fmt -- --check
+make test              # unit tests (no root required)
 make test-integration  # integration tests (requires sudo & btrfs-progs)
-make clean           # cargo clean
-make install         # cargo install --path .
+make clean             # cargo clean
+make install           # cargo install --path .
 ```
 
 ### Unit tests

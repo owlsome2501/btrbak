@@ -1,0 +1,130 @@
+# btrbak configuration file
+#
+# Full reference with all available fields. Commented-out fields show their
+# default values — uncomment and change only what you need.
+#
+# Minimal required fields: name, at least one [[sources]] with path,
+# and [target] with location.
+
+# Configuration name (required, non-empty).
+# Used to distinguish between different backup targets.
+name = "default"
+
+# ---------------------------------------------------------------------------
+# Source subvolumes
+# ---------------------------------------------------------------------------
+# At least one [[sources]] entry is required. Each entry describes a btrfs
+# subvolume to back up.  The alias [[source]] (singular) is also accepted.
+#
+# Volume naming: source paths are converted to target subvolume names
+# automatically:  /  -> root_vol,  /home -> home_vol,  /var/log -> var_log_vol
+
+[[sources]]
+# (required) Absolute path to the btrfs subvolume to back up.
+path = "/"
+# (optional) Directory for local snapshots, relative to the source path.
+# Default: ".snapshots"
+# snapshot_dir = ".snapshots"
+# (optional) Use snapper instead of manual snapshot creation.
+# Default: false
+# use_snapper = false
+# (optional) Name of the manual snapshot subvolume (ignored when use_snapper = true).
+# Default: "btrbak"
+# snapshot_name = "btrbak"
+# (optional) Snapper configuration name. Required when use_snapper = true;
+# if omitted, inferred from the source path basename.
+# snapper_config = "root"
+
+# Add more sources as needed:
+# [[sources]]
+# path = "/home"
+#
+# [[sources]]
+# path = "/var"
+# use_snapper = true
+# snapper_config = "var"
+
+# ---------------------------------------------------------------------------
+# Target
+# ---------------------------------------------------------------------------
+[target]
+# (required) Backup destination. Accepted formats:
+#   "/mnt/backup"                                  — already-mounted path
+#   "/dev/sda1"                                    — device path
+#   "UUID=12345678-1234-1234-1234-123456789012"    — device by UUID
+#   "LABEL=backup_drive"                           — device by label
+#   "PARTUUID=abcd-1234"                           — device by partition UUID
+# Paths starting with /dev/, UUID=, LABEL=, or PARTUUID= are treated as
+# device identifiers and will be automatically mounted/unmounted.
+location = "/mnt/backup"
+# (optional) Enable live boot environment support.
+# Default: false
+# enable_live_boot = false
+# (optional) Subvolume name for storing backup snapshots on the target.
+# Default: "@snapshots" when live boot is enabled, "." (root) otherwise.
+# snapshot_subvolume = "@snapshots"
+# (optional) Subvolume name for the live boot root environment.
+# Default: "@"
+# live_boot_subvolume = "@"
+
+# ---------------------------------------------------------------------------
+# Target encryption (optional)
+# ---------------------------------------------------------------------------
+# Uncomment to enable LUKS encryption for the target device.
+# At least one of keyfile or passphrase_env is required.
+#
+# [target.encryption]
+# (optional) Path to a LUKS keyfile. Should have restricted permissions (chmod 600).
+# keyfile = "/path/to/luks/keyfile"
+# (optional) Environment variable containing the LUKS passphrase.
+# passphrase_env = "BACKUP_PASSPHRASE"
+# (optional) dm-crypt mapping name for the unlocked device.
+# Default: "backup_target"
+# mapping_name = "backup_target"
+
+# ---------------------------------------------------------------------------
+# Live boot (optional, required when enable_live_boot = true)
+# ---------------------------------------------------------------------------
+# Uncomment to configure a bootable backup environment.
+#
+# [live_boot]
+# (required) Path to the EFI System Partition (ESP).
+# esp_path = "/efi"
+# (optional) Bootloader type. Currently only "SystemdBoot" is supported.
+# Default: "SystemdBoot"
+# bootloader = "SystemdBoot"
+#
+# [live_boot.boot_entry]
+# (optional) Title shown in the boot menu.
+# Default: "Backup Environment"
+# title = "Backup Environment"
+# (optional) Kernel image path inside the live boot root subvolume.
+# Default: "/boot/vmlinuz-linux"
+# kernel = "/boot/vmlinuz-linux"
+# (optional) Initramfs image path inside the live boot root subvolume.
+# Default: "/boot/initramfs-linux.img"
+# initramfs = "/boot/initramfs-linux.img"
+# (optional) CPU microcode image path (e.g. "/boot/amd-ucode.img").
+# Default: none
+# microcode = "/boot/amd-ucode.img"
+# (optional) Additional kernel command line options.
+# Default: []
+# options = ["rw", "quiet", "rootflags=subvol=@/root_vol"]
+
+# ---------------------------------------------------------------------------
+# Hooks (optional)
+# ---------------------------------------------------------------------------
+# Post-backup automation. Hooks only run when enable_live_boot = true and
+# a [live_boot] section is present.
+[hooks]
+# Copy kernel and initramfs from the live root to the ESP after each backup.
+# Default: true
+copy_kernel = true
+# Regenerate /etc/fstab in the live boot environment with correct UUIDs
+# and subvolume mount entries.
+# Default: true
+regenerate_fstab = true
+# Remove snapper configuration from the live boot environment to prevent
+# snapper from modifying backup snapshots.
+# Default: true
+remove_snapper_config = true

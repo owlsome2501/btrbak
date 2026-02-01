@@ -339,7 +339,7 @@ fn create_manual_local_snapshot(
     // Check if there's an existing snapshot to preserve as parent
     let parent_snapshot_path = if snapshot_path.exists() && btrfs::is_subvolume(&snapshot_path)? {
         // Rename existing snapshot to preserve it as parent for incremental backup
-        ui::detail(&format!("Preserving previous snapshot for incremental backup"));
+        ui::detail("Preserving previous snapshot for incremental backup");
         btrfs::rename_subvolume(&snapshot_path, &prev_path)?;
         Some(prev_path)
     } else {
@@ -738,4 +738,78 @@ pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
     ui::success("Live boot environment prepared successfully");
     ui::section_end();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::*;
+
+    fn make_config(num_sources: usize, enable_live_boot: bool) -> Config {
+        let sources: Vec<SourceConfig> = (0..num_sources)
+            .map(|i| SourceConfig {
+                path: PathBuf::from(format!("/src{}", i)),
+                snapshot_dir: PathBuf::from(".snapshots"),
+                use_snapper: false,
+                snapshot_name: "btrbak".to_string(),
+                snapper_config: None,
+            })
+            .collect();
+        Config {
+            name: "test".to_string(),
+            sources,
+            target: TargetConfig {
+                location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
+                enable_live_boot,
+                snapshot_subvolume: None,
+                live_root_subvolume: None,
+                encryption: None,
+            },
+            live_boot: None,
+            hooks: HookConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_compute_steps_no_live_boot() {
+        let config = make_config(2, false);
+        // 1 mount + 2 sources + 1 summary = 4
+        assert_eq!(compute_backup_steps(&config), 4);
+    }
+
+    #[test]
+    fn test_compute_steps_with_live_boot() {
+        let config = make_config(3, true);
+        // 1 mount + 3 sources + 1 live boot + 1 summary = 6
+        assert_eq!(compute_backup_steps(&config), 6);
+    }
+
+    #[test]
+    fn test_compute_steps_single_source() {
+        let config = make_config(1, false);
+        // 1 mount + 1 source + 1 summary = 3
+        assert_eq!(compute_backup_steps(&config), 3);
+    }
+
+    #[test]
+    fn test_config_lock_acquire_release() {
+        let lock = ConfigLock::acquire("test_lock_acquire_release");
+        assert!(lock.is_ok());
+        drop(lock);
+        // After releasing, should be able to acquire again
+        let lock2 = ConfigLock::acquire("test_lock_acquire_release");
+        assert!(lock2.is_ok());
+    }
+
+    #[test]
+    fn test_config_lock_error_message() {
+        // ConfigLock uses fcntl locks which are per-process, so we can't test
+        // double-acquire within the same process. Instead verify the error
+        // message format that would be produced on contention.
+        let err = BackupError::Lock(
+            "Another btrbak instance is already running with config name 'test'".to_string(),
+        );
+        let msg = format!("{}", err);
+        assert!(msg.contains("already running"));
+    }
 }

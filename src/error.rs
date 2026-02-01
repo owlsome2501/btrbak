@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_error_from_io() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_error = std::io::Error::other("test");
         let backup_error: BackupError = io_error.into();
         match backup_error {
             BackupError::Io(_) => (),
@@ -198,5 +198,117 @@ mod tests {
         let hints = err.hints();
         assert!(!hints.is_empty());
         assert!(hints.iter().any(|h| h.contains("validate")));
+    }
+
+    // Btrfs hints
+
+    #[test]
+    fn test_hints_btrfs_permission_denied() {
+        let err = BackupError::Btrfs("Permission denied on /mnt".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("sudo")));
+    }
+
+    #[test]
+    fn test_hints_btrfs_snapshot() {
+        let err = BackupError::Btrfs("Failed to create snapshot".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("subvolume is accessible")));
+    }
+
+    #[test]
+    fn test_hints_btrfs_not_subvolume() {
+        let err = BackupError::Btrfs("Path is not a btrfs subvolume".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("valid btrfs subvolume")));
+    }
+
+    #[test]
+    fn test_hints_btrfs_receive() {
+        let err = BackupError::Btrfs("Failed to receive subvolume".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("free space on the target")));
+    }
+
+    // Mount hints
+
+    #[test]
+    fn test_hints_mount_luks() {
+        let err = BackupError::Mount("Failed to open LUKS device".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("cryptsetup isLuks")));
+    }
+
+    #[test]
+    fn test_hints_mount_not_luks() {
+        let err = BackupError::Mount("Device is not a LUKS container".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("encryption is configured")));
+    }
+
+    #[test]
+    fn test_hints_mount_failed() {
+        let err = BackupError::Mount("Failed to mount /dev/sda1".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("mounting manually")));
+    }
+
+    #[test]
+    fn test_hints_mount_unmount_failed() {
+        let err = BackupError::Mount("Failed to unmount /mnt/backup".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("lsof")));
+    }
+
+    #[test]
+    fn test_hints_mount_generic() {
+        let err = BackupError::Mount("some unknown mount issue".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("device exists")));
+    }
+
+    // Bootloader hints
+
+    #[test]
+    fn test_hints_bootloader_systemd_boot() {
+        let err = BackupError::Bootloader("systemd-boot configuration failed".to_string());
+        let hints = err.hints();
+        assert!(hints
+            .iter()
+            .any(|h| h.contains("systemd-boot is installed")));
+    }
+
+    #[test]
+    fn test_hints_bootloader_generic() {
+        let err = BackupError::Bootloader("some bootloader error".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("ESP path")));
+    }
+
+    // Hook hints and other
+
+    #[test]
+    fn test_hints_hook_uuid() {
+        let err = BackupError::Hook("Failed to get UUID for mount".to_string());
+        let hints = err.hints();
+        assert!(hints
+            .iter()
+            .any(|h| h.contains("target device is properly mounted")));
+    }
+
+    #[test]
+    fn test_hints_hook_kernel() {
+        let err = BackupError::Hook("kernel and initramfs copy failed".to_string());
+        let hints = err.hints();
+        assert!(hints
+            .iter()
+            .any(|h| h.contains("kernel and initramfs paths")));
+    }
+
+    #[test]
+    fn test_hints_lock_generic() {
+        let err = BackupError::Lock("failed to create lock".to_string());
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("/tmp is writable")));
     }
 }

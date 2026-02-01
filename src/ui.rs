@@ -338,3 +338,124 @@ pub fn format_cmd(cmd: &Command) -> String {
         format!("{} {}", program, args.join(" "))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // format_duration tests
+
+    #[test]
+    fn test_format_duration_sub_second() {
+        assert_eq!(format_duration(0.5), "0.5s");
+    }
+
+    #[test]
+    fn test_format_duration_one_second() {
+        assert_eq!(format_duration(1.0), "1.0s");
+    }
+
+    #[test]
+    fn test_format_duration_seconds_only() {
+        assert_eq!(format_duration(45.3), "45.3s");
+    }
+
+    #[test]
+    fn test_format_duration_minutes_seconds() {
+        assert_eq!(format_duration(150.0), "2m 30s");
+    }
+
+    #[test]
+    fn test_format_duration_exact_minute() {
+        assert_eq!(format_duration(60.0), "1m 0s");
+    }
+
+    #[test]
+    fn test_format_duration_hours() {
+        assert_eq!(format_duration(3723.0), "1h 2m 3s");
+    }
+
+    #[test]
+    fn test_format_duration_exact_hour() {
+        assert_eq!(format_duration(3600.0), "1h 0m 0s");
+    }
+
+    #[test]
+    fn test_format_duration_zero() {
+        assert_eq!(format_duration(0.0), "0.0s");
+    }
+
+    // format_bytes tests
+
+    #[test]
+    fn test_format_bytes_zero() {
+        assert_eq!(format_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn test_format_bytes_bytes() {
+        assert_eq!(format_bytes(100), "100 B");
+    }
+
+    #[test]
+    fn test_format_bytes_one_kib() {
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+    }
+
+    #[test]
+    fn test_format_bytes_kib() {
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+    }
+
+    #[test]
+    fn test_format_bytes_mib() {
+        assert_eq!(format_bytes(1_048_576), "1.00 MiB");
+    }
+
+    #[test]
+    fn test_format_bytes_mib_fractional() {
+        // 1.5 MiB = 1_572_864 bytes
+        assert_eq!(format_bytes(1_572_864), "1.50 MiB");
+    }
+
+    #[test]
+    fn test_format_bytes_gib() {
+        assert_eq!(format_bytes(1_073_741_824), "1.00 GiB");
+    }
+
+    // format_cmd tests
+
+    #[test]
+    fn test_format_cmd_no_args() {
+        let cmd = Command::new("ls");
+        assert_eq!(format_cmd(&cmd), "ls");
+    }
+
+    #[test]
+    fn test_format_cmd_simple_args() {
+        let mut cmd = Command::new("btrfs");
+        cmd.arg("subvolume").arg("show").arg("/mnt");
+        assert_eq!(format_cmd(&cmd), "btrfs subvolume show /mnt");
+    }
+
+    #[test]
+    fn test_format_cmd_args_with_spaces() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello world");
+        assert_eq!(format_cmd(&cmd), "echo 'hello world'");
+    }
+
+    #[test]
+    fn test_format_cmd_mixed_args() {
+        let mut cmd = Command::new("cp");
+        cmd.arg("/src/file").arg("/dest/path with spaces");
+        assert_eq!(format_cmd(&cmd), "cp /src/file '/dest/path with spaces'");
+    }
+
+    #[test]
+    fn test_format_cmd_multiple_space_args() {
+        let mut cmd = Command::new("test");
+        cmd.arg("arg one").arg("arg two");
+        assert_eq!(format_cmd(&cmd), "test 'arg one' 'arg two'");
+    }
+}

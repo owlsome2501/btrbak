@@ -393,7 +393,360 @@ mod tests {
         "#;
         temp_file.write_all(toml_content.as_bytes()).unwrap();
 
-        let config = Config::from_file(&temp_file.path().to_path_buf());
+        let config = Config::from_file(temp_file.path());
         assert!(config.is_ok());
+    }
+
+    // TargetLocation deserialization tests
+
+    #[test]
+    fn test_target_location_dev_path() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "/dev/sda1"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(matches!(config.target.location, TargetLocation::Device(_)));
+    }
+
+    #[test]
+    fn test_target_location_uuid() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "UUID=abcd-1234"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(matches!(config.target.location, TargetLocation::Device(_)));
+    }
+
+    #[test]
+    fn test_target_location_label() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "LABEL=backup"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(matches!(config.target.location, TargetLocation::Device(_)));
+    }
+
+    #[test]
+    fn test_target_location_partuuid() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "PARTUUID=abcd-1234"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(matches!(config.target.location, TargetLocation::Device(_)));
+    }
+
+    #[test]
+    fn test_target_location_mounted_path() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "/mnt/backup"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        match &config.target.location {
+            TargetLocation::MountedPath(p) => assert_eq!(p, &PathBuf::from("/mnt/backup")),
+            _ => panic!("Expected MountedPath"),
+        }
+    }
+
+    #[test]
+    fn test_target_location_relative_path() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "backup/dir"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        match &config.target.location {
+            TargetLocation::MountedPath(p) => assert_eq!(p, &PathBuf::from("backup/dir")),
+            _ => panic!("Expected MountedPath"),
+        }
+    }
+
+    // Multiple sources and alias tests
+
+    #[test]
+    fn test_config_multiple_sources() {
+        let toml_content = r#"
+            name = "multi"
+            [[sources]]
+            path = "/"
+            [[sources]]
+            path = "/home"
+            [[sources]]
+            path = "/var/log"
+            [target]
+            location = "/mnt/backup"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.sources.len(), 3);
+        assert_eq!(config.sources[0].path, PathBuf::from("/"));
+        assert_eq!(config.sources[1].path, PathBuf::from("/home"));
+        assert_eq!(config.sources[2].path, PathBuf::from("/var/log"));
+    }
+
+    #[test]
+    fn test_config_source_alias() {
+        let toml_content = r#"
+            name = "alias"
+            [[source]]
+            path = "/home"
+            [target]
+            location = "/mnt/backup"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.sources[0].path, PathBuf::from("/home"));
+    }
+
+    // Live boot configuration tests
+
+    #[test]
+    fn test_config_live_boot_full() {
+        let toml_content = r#"
+            name = "liveboot"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "/dev/sda1"
+            enable_live_boot = true
+            [live_boot]
+            esp_path = "/efi"
+            bootloader = "SystemdBoot"
+            [live_boot.boot_entry]
+            title = "My Backup"
+            kernel = "/boot/vmlinuz-linux"
+            initramfs = "/boot/initramfs-linux.img"
+            options = ["root=UUID=xxxx", "rw"]
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        let lb = config.live_boot.unwrap();
+        assert_eq!(lb.esp_path, PathBuf::from("/efi"));
+        assert_eq!(lb.boot_entry.title, "My Backup");
+        assert_eq!(lb.boot_entry.options.len(), 2);
+    }
+
+    #[test]
+    fn test_config_live_boot_defaults() {
+        let toml_content = r#"
+            name = "liveboot"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "/dev/sda1"
+            [live_boot]
+            esp_path = "/efi"
+            [live_boot.boot_entry]
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        let lb = config.live_boot.unwrap();
+        assert_eq!(lb.boot_entry.title, "Backup Environment");
+        assert_eq!(lb.boot_entry.kernel, PathBuf::from("/boot/vmlinuz-linux"));
+        assert_eq!(
+            lb.boot_entry.initramfs,
+            PathBuf::from("/boot/initramfs-linux.img")
+        );
+        assert!(lb.boot_entry.options.is_empty());
+    }
+
+    #[test]
+    fn test_config_boot_entry_options() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "/dev/sda1"
+            [live_boot]
+            esp_path = "/efi"
+            [live_boot.boot_entry]
+            options = ["root=UUID=abcd", "rw", "quiet"]
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        let opts = &config.live_boot.unwrap().boot_entry.options;
+        assert_eq!(opts.len(), 3);
+        assert_eq!(opts[0], "root=UUID=abcd");
+        assert_eq!(opts[2], "quiet");
+    }
+
+    // HookConfig and EncryptionConfig tests
+
+    #[test]
+    fn test_hook_config_defaults() {
+        // When [hooks] section is present but empty, serde field defaults apply
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "/mnt"
+            [hooks]
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(config.hooks.copy_kernel);
+        assert!(config.hooks.regenerate_fstab);
+        assert!(config.hooks.remove_snapper_config);
+    }
+
+    #[test]
+    fn test_hook_config_override() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "/mnt"
+            [hooks]
+            copy_kernel = false
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(!config.hooks.copy_kernel);
+        assert!(config.hooks.regenerate_fstab);
+        assert!(config.hooks.remove_snapper_config);
+    }
+
+    #[test]
+    fn test_encryption_default_mapping_name() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "/dev/sda1"
+            [target.encryption]
+            keyfile = "/tmp/key"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        let enc = config.target.encryption.unwrap();
+        assert_eq!(enc.mapping_name, "backup_target");
+    }
+
+    #[test]
+    fn test_encryption_no_keyfile_no_env() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/"
+            [target]
+            location = "/dev/sda1"
+            [target.encryption]
+            mapping_name = "custom"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        let enc = config.target.encryption.unwrap();
+        assert!(enc.keyfile.is_none());
+        assert!(enc.passphrase_env.is_none());
+        assert_eq!(enc.mapping_name, "custom");
+    }
+
+    // SourceConfig defaults and validation tests
+
+    #[test]
+    fn test_source_config_default_snapshot_dir() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/home"
+            [target]
+            location = "/mnt"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.sources[0].snapshot_dir, PathBuf::from(".snapshots"));
+    }
+
+    #[test]
+    fn test_source_config_default_snapshot_name() {
+        let toml_content = r#"
+            name = "test"
+            [[sources]]
+            path = "/home"
+            [target]
+            location = "/mnt"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.sources[0].snapshot_name, "btrbak");
+    }
+
+    #[test]
+    fn test_validate_empty_name() {
+        let config = Config {
+            name: "  ".to_string(),
+            sources: vec![SourceConfig {
+                path: PathBuf::from("/test"),
+                snapshot_dir: default_snapshot_dir(),
+                use_snapper: false,
+                snapshot_name: default_snapshot_name(),
+                snapper_config: None,
+            }],
+            target: TargetConfig {
+                location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
+                enable_live_boot: false,
+                snapshot_subvolume: None,
+                live_root_subvolume: None,
+                encryption: None,
+            },
+            live_boot: None,
+            hooks: HookConfig::default(),
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-empty"));
+    }
+
+    #[test]
+    fn test_validate_empty_sources() {
+        let config = Config {
+            name: "test".to_string(),
+            sources: vec![],
+            target: TargetConfig {
+                location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
+                enable_live_boot: false,
+                snapshot_subvolume: None,
+                live_root_subvolume: None,
+                encryption: None,
+            },
+            live_boot: None,
+            hooks: HookConfig::default(),
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No source configurations"));
+    }
+
+    #[test]
+    fn test_config_from_file_nonexistent() {
+        let result = Config::from_file(Path::new("/nonexistent/path/config.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_from_file_invalid_toml() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"this is not valid toml {{{{").unwrap();
+        let result = Config::from_file(temp_file.path());
+        assert!(result.is_err());
     }
 }

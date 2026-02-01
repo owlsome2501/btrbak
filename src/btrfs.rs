@@ -624,3 +624,149 @@ pub fn is_btrfs_filesystem(path: &Path) -> Result<bool, BackupError> {
     let output = cmd.output()?;
     Ok(output.status.success())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // TransferStats::speed() tests
+
+    #[test]
+    fn test_transfer_stats_speed_basic() {
+        let stats = TransferStats {
+            bytes: 1_000_000,
+            elapsed_secs: 2.0,
+        };
+        assert_eq!(stats.speed(), 500_000);
+    }
+
+    #[test]
+    fn test_transfer_stats_speed_zero_elapsed() {
+        let stats = TransferStats {
+            bytes: 1_000_000,
+            elapsed_secs: 0.0,
+        };
+        assert_eq!(stats.speed(), 0);
+    }
+
+    #[test]
+    fn test_transfer_stats_speed_negative_elapsed() {
+        let stats = TransferStats {
+            bytes: 1_000_000,
+            elapsed_secs: -1.0,
+        };
+        assert_eq!(stats.speed(), 0);
+    }
+
+    #[test]
+    fn test_transfer_stats_speed_zero_bytes() {
+        let stats = TransferStats {
+            bytes: 0,
+            elapsed_secs: 5.0,
+        };
+        assert_eq!(stats.speed(), 0);
+    }
+
+    // get_volume_name_from_path() tests
+
+    #[test]
+    fn test_volume_name_root() {
+        assert_eq!(get_volume_name_from_path(Path::new("/")), "root");
+    }
+
+    #[test]
+    fn test_volume_name_single_component() {
+        assert_eq!(get_volume_name_from_path(Path::new("/home")), "home");
+    }
+
+    #[test]
+    fn test_volume_name_multi_component() {
+        assert_eq!(get_volume_name_from_path(Path::new("/var/log")), "var_log");
+    }
+
+    #[test]
+    fn test_volume_name_deep_path() {
+        assert_eq!(
+            get_volume_name_from_path(Path::new("/var/lib/docker")),
+            "var_lib_docker"
+        );
+    }
+
+    #[test]
+    fn test_volume_name_dot() {
+        assert_eq!(get_volume_name_from_path(Path::new(".")), "root");
+    }
+
+    #[test]
+    fn test_volume_name_relative() {
+        assert_eq!(
+            get_volume_name_from_path(Path::new("home/user")),
+            "home_user"
+        );
+    }
+
+    #[test]
+    fn test_volume_name_trailing_slash() {
+        assert_eq!(get_volume_name_from_path(Path::new("/boot/")), "boot");
+    }
+
+    // get_subvolume_name_with_suffix() tests
+
+    #[test]
+    fn test_subvolume_name_suffix_root() {
+        assert_eq!(
+            get_subvolume_name_with_suffix(Path::new("/")),
+            "root_vol"
+        );
+    }
+
+    #[test]
+    fn test_subvolume_name_suffix_home() {
+        assert_eq!(
+            get_subvolume_name_with_suffix(Path::new("/home")),
+            "home_vol"
+        );
+    }
+
+    #[test]
+    fn test_subvolume_name_suffix_deep() {
+        assert_eq!(
+            get_subvolume_name_with_suffix(Path::new("/var/log")),
+            "var_log_vol"
+        );
+    }
+
+    #[test]
+    fn test_subvolume_name_suffix_dot() {
+        assert_eq!(
+            get_subvolume_name_with_suffix(Path::new(".")),
+            "root_vol"
+        );
+    }
+
+    // get_subvolume_name() tests
+
+    #[test]
+    fn test_get_subvolume_name_simple() {
+        let result = get_subvolume_name(Path::new("/mnt/snapshots/root_vol"));
+        assert_eq!(result.unwrap(), "root_vol");
+    }
+
+    #[test]
+    fn test_get_subvolume_name_single() {
+        let result = get_subvolume_name(Path::new("/home"));
+        assert_eq!(result.unwrap(), "home");
+    }
+
+    #[test]
+    fn test_get_subvolume_name_root_err() {
+        let result = get_subvolume_name(Path::new("/"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_subvolume_name_nested() {
+        let result = get_subvolume_name(Path::new("/a/b/c/d"));
+        assert_eq!(result.unwrap(), "d");
+    }
+}

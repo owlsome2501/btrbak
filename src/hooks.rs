@@ -287,6 +287,8 @@ fn get_device_uuid(mount_point: &Path) -> Result<String, BackupError> {
 }
 
 /// Remove snapper configuration from live boot environment
+///
+/// Removes config files from `etc/snapper/configs` and disables snapper systemd services.
 fn remove_snapper_config(live_root: &Path) -> Result<(), BackupError> {
     let snapper_config_dir = live_root.join("etc/snapper/configs");
 
@@ -318,4 +320,274 @@ fn remove_snapper_config(live_root: &Path) -> Result<(), BackupError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::*;
+    use tempfile::TempDir;
+
+    // remove_snapper_config tests
+
+    #[test]
+    fn test_remove_snapper_config_removes_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Create snapper config files
+        let config_dir = root.join("etc/snapper/configs");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(config_dir.join("root"), "SNAPPER_CONFIG").unwrap();
+        fs::write(config_dir.join("home"), "SNAPPER_CONFIG").unwrap();
+
+        remove_snapper_config(root).unwrap();
+
+        // Config files should be removed
+        assert!(!config_dir.join("root").exists());
+        assert!(!config_dir.join("home").exists());
+    }
+
+    #[test]
+    fn test_remove_snapper_config_removes_services() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Create systemd service files
+        let service_dir = root.join("etc/systemd/system/multi-user.target.wants");
+        fs::create_dir_all(&service_dir).unwrap();
+        fs::write(service_dir.join("snapper-cleanup.service"), "").unwrap();
+
+        let timer_dir = root.join("etc/systemd/system/timers.target.wants");
+        fs::create_dir_all(&timer_dir).unwrap();
+        fs::write(timer_dir.join("snapper-cleanup.timer"), "").unwrap();
+
+        remove_snapper_config(root).unwrap();
+
+        assert!(!service_dir.join("snapper-cleanup.service").exists());
+        assert!(!timer_dir.join("snapper-cleanup.timer").exists());
+    }
+
+    #[test]
+    fn test_remove_snapper_config_no_dir() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // No snapper directories exist - should succeed without error
+        let result = remove_snapper_config(root);
+        assert!(result.is_ok());
+    }
+
+    // find_root_vol_path tests
+
+    #[test]
+    fn test_find_root_vol_path_with_root_source() {
+        let config = Config {
+            name: "test".to_string(),
+            sources: vec![
+                SourceConfig {
+                    path: PathBuf::from("/home"),
+                    snapshot_dir: PathBuf::from(".snapshots"),
+                    use_snapper: false,
+                    snapshot_name: "btrbak".to_string(),
+                    snapper_config: None,
+                },
+                SourceConfig {
+                    path: PathBuf::from("/"),
+                    snapshot_dir: PathBuf::from(".snapshots"),
+                    use_snapper: false,
+                    snapshot_name: "btrbak".to_string(),
+                    snapper_config: None,
+                },
+            ],
+            target: TargetConfig {
+                location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
+                enable_live_boot: false,
+                snapshot_subvolume: None,
+                live_root_subvolume: None,
+                encryption: None,
+            },
+            live_boot: None,
+            hooks: HookConfig::default(),
+        };
+
+        let live_root = Path::new("/mnt/@");
+        let result = find_root_vol_path(live_root, &config);
+        assert_eq!(result, PathBuf::from("/mnt/@/root_vol"));
+    }
+
+    #[test]
+    fn test_find_root_vol_path_fallback() {
+        let config = Config {
+            name: "test".to_string(),
+            sources: vec![SourceConfig {
+                path: PathBuf::from("/home"),
+                snapshot_dir: PathBuf::from(".snapshots"),
+                use_snapper: false,
+                snapshot_name: "btrbak".to_string(),
+                snapper_config: None,
+            }],
+            target: TargetConfig {
+                location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
+                enable_live_boot: false,
+                snapshot_subvolume: None,
+                live_root_subvolume: None,
+                encryption: None,
+            },
+            live_boot: None,
+            hooks: HookConfig::default(),
+        };
+
+        let live_root = Path::new("/mnt/@");
+        let result = find_root_vol_path(live_root, &config);
+        // No "/" source, should fallback to "root_vol"
+        assert_eq!(result, PathBuf::from("/mnt/@/root_vol"));
+    }
+
+    // copy_kernel_to_esp tests
+
+    #[test]
+    fn test_copy_kernel_to_esp_copies_files() {
+        let tmp = TempDir::new().unwrap();
+        let root_vol = tmp.path().join("root_vol");
+        let esp = tmp.path().join("esp");
+        fs::create_dir_all(&esp).unwrap();
+
+        // Create kernel and initramfs in root_vol
+        let boot_dir = root_vol.join("boot");
+        fs::create_dir_all(&boot_dir).unwrap();
+        fs::write(boot_dir.join("vmlinuz-linux"), "KERNEL_DATA").unwrap();
+        fs::write(boot_dir.join("initramfs-linux.img"), "INITRAMFS_DATA").unwrap();
+
+        let boot_entry = BootEntryConfig {
+            title: "Test".to_string(),
+            kernel: PathBuf::from("/boot/vmlinuz-linux"),
+            initramfs: PathBuf::from("/boot/initramfs-linux.img"),
+            microcode: None,
+            options: vec![],
+        };
+
+        copy_kernel_to_esp(&root_vol, &esp, &boot_entry).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(esp.join("vmlinuz-linux")).unwrap(),
+            "KERNEL_DATA"
+        );
+        assert_eq!(
+            fs::read_to_string(esp.join("initramfs-linux.img")).unwrap(),
+            "INITRAMFS_DATA"
+        );
+    }
+
+    #[test]
+    fn test_copy_kernel_to_esp_missing_kernel() {
+        let tmp = TempDir::new().unwrap();
+        let root_vol = tmp.path().join("root_vol");
+        let esp = tmp.path().join("esp");
+        fs::create_dir_all(&root_vol).unwrap();
+        fs::create_dir_all(&esp).unwrap();
+
+        let boot_entry = BootEntryConfig {
+            title: "Test".to_string(),
+            kernel: PathBuf::from("/boot/vmlinuz-linux"),
+            initramfs: PathBuf::from("/boot/initramfs-linux.img"),
+            microcode: None,
+            options: vec![],
+        };
+
+        // Should succeed (just warns, doesn't error)
+        let result = copy_kernel_to_esp(&root_vol, &esp, &boot_entry);
+        assert!(result.is_ok());
+        // No files should be copied
+        assert!(!esp.join("vmlinuz-linux").exists());
+    }
+
+    // generate_basic_fstab tests
+
+    #[test]
+    fn test_generate_fstab_structure() {
+        let tmp = TempDir::new().unwrap();
+        let root_vol = tmp.path().join("root_vol");
+        let target_mount = tmp.path().join("target");
+        let esp = tmp.path().join("esp");
+        fs::create_dir_all(&root_vol).unwrap();
+        fs::create_dir_all(&target_mount).unwrap();
+        fs::create_dir_all(&esp).unwrap();
+
+        let config = Config {
+            name: "test".to_string(),
+            sources: vec![
+                SourceConfig {
+                    path: PathBuf::from("/"),
+                    snapshot_dir: PathBuf::from(".snapshots"),
+                    use_snapper: false,
+                    snapshot_name: "btrbak".to_string(),
+                    snapper_config: None,
+                },
+                SourceConfig {
+                    path: PathBuf::from("/home"),
+                    snapshot_dir: PathBuf::from(".snapshots"),
+                    use_snapper: false,
+                    snapshot_name: "btrbak".to_string(),
+                    snapper_config: None,
+                },
+            ],
+            target: TargetConfig {
+                location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
+                enable_live_boot: true,
+                snapshot_subvolume: None,
+                live_root_subvolume: None,
+                encryption: None,
+            },
+            live_boot: None,
+            hooks: HookConfig::default(),
+        };
+
+        let fstab = generate_basic_fstab(&root_vol, &target_mount, &esp, &config);
+
+        // Should contain header comments
+        assert!(fstab.contains("# /etc/fstab"));
+        // Should contain entries for both sources
+        assert!(fstab.contains("subvol=@/root_vol"));
+        assert!(fstab.contains("subvol=@/home_vol"));
+        // Should contain tmpfs
+        assert!(fstab.contains("tmpfs  /tmp"));
+    }
+
+    #[test]
+    fn test_generate_fstab_single_source() {
+        let tmp = TempDir::new().unwrap();
+        let root_vol = tmp.path().join("root_vol");
+        let target_mount = tmp.path().join("target");
+        let esp = tmp.path().join("esp");
+        fs::create_dir_all(&root_vol).unwrap();
+        fs::create_dir_all(&target_mount).unwrap();
+        fs::create_dir_all(&esp).unwrap();
+
+        let config = Config {
+            name: "test".to_string(),
+            sources: vec![SourceConfig {
+                path: PathBuf::from("/"),
+                snapshot_dir: PathBuf::from(".snapshots"),
+                use_snapper: false,
+                snapshot_name: "btrbak".to_string(),
+                snapper_config: None,
+            }],
+            target: TargetConfig {
+                location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
+                enable_live_boot: true,
+                snapshot_subvolume: None,
+                live_root_subvolume: None,
+                encryption: None,
+            },
+            live_boot: None,
+            hooks: HookConfig::default(),
+        };
+
+        let fstab = generate_basic_fstab(&root_vol, &target_mount, &esp, &config);
+
+        // Should contain the root subvol entry with correct path
+        assert!(fstab.contains("subvol=@/root_vol"));
+        // Mount point for "/" source should be "/"
+        assert!(fstab.contains("  /  btrfs"));
+    }
 }

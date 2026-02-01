@@ -71,6 +71,7 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
         return Ok(());
     }
 
+    let backup_start = std::time::Instant::now();
     let total_steps = compute_backup_steps(&config);
     let mut current_step = 0;
 
@@ -81,7 +82,8 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
     let target_mount = mount_guard.mount_point();
     ui::success("Target mounted");
 
-    // Collect errors from each source backup
+    // Collect per-source results
+    let mut source_results: Vec<(PathBuf, Option<btrfs::TransferStats>)> = Vec::new();
     let mut errors = Vec::new();
 
     // Backup each source
@@ -94,8 +96,9 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
         );
 
         match backup_single_source(source, &config.target, target_mount, &config.name) {
-            Ok(()) => {
+            Ok(stats) => {
                 ui::success(&format!("Backed up {}", source.path.display()));
+                source_results.push((source.path.clone(), Some(stats)));
             }
             Err(e) => {
                 ui::error(&format!(
@@ -103,6 +106,7 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
                     source.path.display(),
                     e
                 ));
+                source_results.push((source.path.clone(), None));
                 errors.push((source.path.clone(), e));
             }
         }
@@ -121,7 +125,13 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
         }
     }
 
-    // Report any errors that occurred
+    // Always show summary
+    current_step += 1;
+    ui::step(current_step, total_steps, "Summary");
+    print_summary(&source_results, &backup_start);
+    ui::section_end();
+
+    // Return error after summary if any source failed
     if !errors.is_empty() {
         let error_msg = errors
             .iter()
@@ -134,13 +144,57 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
         )));
     }
 
-    // Summary step
-    current_step += 1;
-    ui::step(current_step, total_steps, "Summary");
-    ui::success("Backup completed successfully");
-    ui::section_end();
-
     Ok(())
+}
+
+/// Print a final summary of all source backup results
+fn print_summary(
+    results: &[(PathBuf, Option<btrfs::TransferStats>)],
+    start: &std::time::Instant,
+) {
+    for (path, stats) in results {
+        match stats {
+            Some(s) => {
+                ui::success(&format!(
+                    "{}: {} ({}/s)",
+                    path.display(),
+                    ui::format_bytes(s.bytes),
+                    ui::format_bytes(s.speed()),
+                ));
+            }
+            None => {
+                ui::error(&format!("{}: failed", path.display()));
+            }
+        }
+    }
+
+    let total_bytes: u64 = results
+        .iter()
+        .filter_map(|(_, s)| s.as_ref())
+        .map(|s| s.bytes)
+        .sum();
+    let total_elapsed = start.elapsed().as_secs_f64();
+
+    ui::info(&format!(
+        "Total: {} transferred in {}",
+        ui::format_bytes(total_bytes),
+        ui::format_duration(total_elapsed),
+    ));
+
+    let succeeded = results.iter().filter(|(_, s)| s.is_some()).count();
+    let failed = results.iter().filter(|(_, s)| s.is_none()).count();
+
+    if failed == 0 {
+        ui::success(&format!(
+            "Backup completed successfully ({} sources)",
+            succeeded,
+        ));
+    } else {
+        ui::warning(&format!(
+            "Backup completed with errors ({} succeeded, {} failed)",
+            succeeded, failed,
+        ));
+    }
 }
 
 /// Backup a single source volume
@@ -149,7 +203,7 @@ fn backup_single_source(
     target_config: &TargetConfig,
     target_mount: &Path,
     config_name: &str,
-) -> Result<(), BackupError> {
+) -> Result<btrfs::TransferStats, BackupError> {
     // Create local snapshot and get parent snapshot (if any)
     ui::substep("Creating local snapshot");
     let (snapshot_path, local_parent_snapshot) = create_local_snapshot(source, config_name)?;
@@ -165,7 +219,7 @@ fn backup_single_source(
         "full"
     };
     ui::substep(&format!("Sending snapshot to target ({})", mode));
-    send_snapshot(
+    let stats = send_snapshot(
         source,
         target_config,
         &snapshot_path,
@@ -177,7 +231,7 @@ fn backup_single_source(
     ui::substep("Cleaning up old snapshots");
     cleanup_old_snapshot(source, local_parent_snapshot, config_name)?;
 
-    Ok(())
+    Ok(stats)
 }
 
 /// Mount target device if needed
@@ -444,7 +498,7 @@ fn send_snapshot(
     snapshot_path: &Path,
     parent_snapshot: Option<&Path>,
     target_mount: &Path,
-) -> Result<(), BackupError> {
+) -> Result<btrfs::TransferStats, BackupError> {
     // Determine target volume name and parent directory
     let subvolume_name = btrfs::get_subvolume_name_with_suffix(&source.path);
 
@@ -461,7 +515,7 @@ fn send_snapshot(
     }
 
     // Send the snapshot safely with atomic replacement
-    btrfs::send_and_replace_safely(
+    let stats = btrfs::send_and_replace_safely(
         snapshot_path,
         parent_snapshot,
         &target_parent_dir,
@@ -474,7 +528,7 @@ fn send_snapshot(
         target_parent_dir.display(),
         target_subvol_name
     ));
-    Ok(())
+    Ok(stats)
 }
 
 /// Update live boot environment

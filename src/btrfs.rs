@@ -4,6 +4,22 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Statistics from a single send/receive transfer.
+pub struct TransferStats {
+    pub bytes: u64,
+    pub elapsed_secs: f64,
+}
+
+impl TransferStats {
+    pub fn speed(&self) -> u64 {
+        if self.elapsed_secs > 0.0 {
+            (self.bytes as f64 / self.elapsed_secs) as u64
+        } else {
+            0
+        }
+    }
+}
+
 /// Check if a path is a btrfs subvolume
 pub fn is_subvolume(path: &Path) -> Result<bool, BackupError> {
     let mut cmd = Command::new("btrfs");
@@ -216,7 +232,7 @@ pub fn send_and_receive_piped(
     source: &Path,
     parent: Option<&Path>,
     dest_dir: &Path,
-) -> Result<(), BackupError> {
+) -> Result<TransferStats, BackupError> {
     // Display as a single logical piped command
     let send_part = if let Some(p) = parent {
         format!("btrfs send -p {} {}", p.display(), source.display())
@@ -286,7 +302,10 @@ pub fn send_and_receive_piped(
         )));
     }
 
-    Ok(())
+    Ok(TransferStats {
+        bytes: total_bytes,
+        elapsed_secs: elapsed,
+    })
 }
 
 /// Find the latest snapshot in a directory
@@ -432,7 +451,7 @@ pub fn send_and_replace_safely(
     dest_dir: &Path,
     backup_suffix: &str,
     target_name: Option<&str>,
-) -> Result<(), BackupError> {
+) -> Result<TransferStats, BackupError> {
     // Determine target subvolume name
     let subvol_name = match target_name {
         Some(name) => name.to_string(),
@@ -486,10 +505,13 @@ pub fn send_and_replace_safely(
     };
 
     // Receive the subvolume directly into dest_dir
-    if let Err(e) = send_and_receive_piped(source, parent, dest_dir) {
-        restore_renamed();
-        return Err(e);
-    }
+    let stats = match send_and_receive_piped(source, parent, dest_dir) {
+        Ok(stats) => stats,
+        Err(e) => {
+            restore_renamed();
+            return Err(e);
+        }
+    };
 
     // Verify the subvolume was received
     if !is_subvolume(&received_path)? {
@@ -519,7 +541,7 @@ pub fn send_and_replace_safely(
         rename_subvolume(&backup, &received_path)?;
     }
 
-    Ok(())
+    Ok(stats)
 }
 
 /// Safely replace a subvolume by moving another subvolume into its place using atomic rename operations

@@ -203,6 +203,23 @@ pub fn section_end() {
     println_stderr("");
 }
 
+/// Format a duration in seconds into human-readable string
+pub fn format_duration(secs: f64) -> String {
+    let total_secs = secs as u64;
+    if total_secs >= 3600 {
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        let s = total_secs % 60;
+        format!("{}h {}m {}s", hours, mins, s)
+    } else if total_secs >= 60 {
+        let mins = total_secs / 60;
+        let s = total_secs % 60;
+        format!("{}m {}s", mins, s)
+    } else {
+        format!("{:.1}s", secs)
+    }
+}
+
 /// Format byte count into human-readable string (e.g. "12.34 MiB")
 pub fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;

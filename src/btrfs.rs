@@ -769,4 +769,423 @@ mod tests {
         let result = get_subvolume_name(Path::new("/a/b/c/d"));
         assert_eq!(result.unwrap(), "d");
     }
+
+    // ========================
+    // Integration tests (require BTRBAK_TEST_BTRFS_DIR)
+    // ========================
+
+    use crate::test_util::{require_btrfs_test_dir, write_test_file};
+
+    // --- Subvolume basic operations ---
+
+    #[test]
+    fn test_btrfs_create_subvolume_and_is_subvolume() {
+        let td = require_btrfs_test_dir!("create_subvol");
+
+        let sv = td.path.join("sv");
+        create_subvolume(&sv).unwrap();
+        assert!(is_subvolume(&sv).unwrap());
+
+        // Plain directory should NOT be a subvolume
+        let plain = td.path.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!is_subvolume(&plain).unwrap());
+    }
+
+    #[test]
+    fn test_btrfs_create_subvolume_already_exists() {
+        let td = require_btrfs_test_dir!("create_subvol_exists");
+
+        let sv = td.path.join("sv");
+        create_subvolume(&sv).unwrap();
+        let err = create_subvolume(&sv);
+        assert!(err.is_err());
+        assert!(matches!(err.unwrap_err(), BackupError::Btrfs(_)));
+    }
+
+    #[test]
+    fn test_btrfs_delete_subvolume() {
+        let td = require_btrfs_test_dir!("delete_subvol");
+
+        let sv = td.path.join("sv");
+        create_subvolume(&sv).unwrap();
+        assert!(sv.exists());
+
+        delete_subvolume(&sv).unwrap();
+        assert!(!sv.exists());
+    }
+
+    #[test]
+    fn test_btrfs_delete_subvolume_nonexistent() {
+        let td = require_btrfs_test_dir!("delete_subvol_noent");
+
+        let sv = td.path.join("does_not_exist");
+        let err = delete_subvolume(&sv);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_btrfs_rename_subvolume() {
+        let td = require_btrfs_test_dir!("rename_subvol");
+
+        let old = td.path.join("old_sv");
+        let new = td.path.join("new_sv");
+        create_subvolume(&old).unwrap();
+
+        rename_subvolume(&old, &new).unwrap();
+        assert!(!old.exists());
+        assert!(is_subvolume(&new).unwrap());
+    }
+
+    #[test]
+    fn test_btrfs_get_subvolume_id() {
+        let td = require_btrfs_test_dir!("get_subvol_id");
+
+        let sv = td.path.join("sv");
+        create_subvolume(&sv).unwrap();
+
+        let id = get_subvolume_id(&sv).unwrap();
+        assert!(id > 0);
+    }
+
+    #[test]
+    fn test_btrfs_get_subvolume_id_not_subvolume() {
+        let td = require_btrfs_test_dir!("get_subvol_id_plain");
+
+        let plain = td.path.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+
+        let err = get_subvolume_id(&plain);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_btrfs_is_btrfs_filesystem() {
+        let td = require_btrfs_test_dir!("is_btrfs_fs");
+        assert!(is_btrfs_filesystem(&td.path).unwrap());
+    }
+
+    // --- Snapshot operations ---
+
+    #[test]
+    fn test_btrfs_create_snapshot_readonly() {
+        let td = require_btrfs_test_dir!("snap_ro");
+
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+        write_test_file(&src, "hello.txt", "world");
+
+        let snap = td.path.join("snap_ro");
+        create_snapshot(&src, &snap).unwrap();
+        assert!(is_subvolume(&snap).unwrap());
+
+        // Snapshot contains the source file
+        assert_eq!(
+            std::fs::read_to_string(snap.join("hello.txt")).unwrap(),
+            "world"
+        );
+
+        // Writing to read-only snapshot should fail
+        let write_result = std::fs::write(snap.join("new.txt"), "fail");
+        assert!(write_result.is_err());
+    }
+
+    #[test]
+    fn test_btrfs_create_snapshot_rw() {
+        let td = require_btrfs_test_dir!("snap_rw");
+
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+        write_test_file(&src, "hello.txt", "world");
+
+        let snap = td.path.join("snap_rw");
+        create_snapshot_rw(&src, &snap).unwrap();
+        assert!(is_subvolume(&snap).unwrap());
+
+        assert_eq!(
+            std::fs::read_to_string(snap.join("hello.txt")).unwrap(),
+            "world"
+        );
+
+        // Writing to read-write snapshot should succeed
+        std::fs::write(snap.join("new.txt"), "ok").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(snap.join("new.txt")).unwrap(),
+            "ok"
+        );
+    }
+
+    // --- find_latest_snapshot ---
+
+    #[test]
+    fn test_btrfs_find_latest_snapshot_empty() {
+        let td = require_btrfs_test_dir!("find_latest_empty");
+
+        let snap_dir = td.path.join("snapshots");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+
+        let result = find_latest_snapshot(&snap_dir).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_btrfs_find_latest_snapshot_single() {
+        let td = require_btrfs_test_dir!("find_latest_single");
+
+        let snap_dir = td.path.join("snapshots");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+
+        let snap = snap_dir.join("snap1");
+        create_snapshot(&src, &snap).unwrap();
+
+        let result = find_latest_snapshot(&snap_dir).unwrap();
+        assert_eq!(result.unwrap(), snap);
+    }
+
+    #[test]
+    fn test_btrfs_find_latest_snapshot_multiple() {
+        let td = require_btrfs_test_dir!("find_latest_multi");
+
+        let snap_dir = td.path.join("snapshots");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+
+        let snap1 = snap_dir.join("snap1");
+        create_snapshot(&src, &snap1).unwrap();
+
+        // Brief pause to ensure different mtime
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let snap2 = snap_dir.join("snap2");
+        create_snapshot(&src, &snap2).unwrap();
+
+        let result = find_latest_snapshot(&snap_dir).unwrap();
+        assert_eq!(result.unwrap(), snap2);
+    }
+
+    #[test]
+    fn test_btrfs_find_latest_snapshot_nonexistent_dir() {
+        let td = require_btrfs_test_dir!("find_latest_nodir");
+
+        let result = find_latest_snapshot(&td.path.join("no_such_dir")).unwrap();
+        assert!(result.is_none());
+    }
+
+    // --- Send / Receive ---
+
+    #[test]
+    fn test_btrfs_send_and_receive_piped() {
+        let td = require_btrfs_test_dir!("send_recv_piped");
+
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+        write_test_file(&src, "data.txt", "payload");
+
+        // Create read-only snapshot (required for send)
+        let snap = td.path.join("snap");
+        create_snapshot(&src, &snap).unwrap();
+
+        let dest = td.path.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let stats = send_and_receive_piped(&snap, None, &dest).unwrap();
+        assert!(stats.bytes > 0);
+
+        // The received subvolume keeps the snapshot name
+        let received = dest.join("snap");
+        assert!(is_subvolume(&received).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(received.join("data.txt")).unwrap(),
+            "payload"
+        );
+    }
+
+    #[test]
+    fn test_btrfs_send_and_receive_incremental() {
+        let td = require_btrfs_test_dir!("send_recv_incr");
+
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+        write_test_file(&src, "file1.txt", "first");
+
+        let snap1 = td.path.join("snap1");
+        create_snapshot(&src, &snap1).unwrap();
+
+        let dest = td.path.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // Full send of snap1
+        send_and_receive_piped(&snap1, None, &dest).unwrap();
+
+        // Add more data
+        write_test_file(&src, "file2.txt", "second");
+        let snap2 = td.path.join("snap2");
+        create_snapshot(&src, &snap2).unwrap();
+
+        // Incremental send of snap2 with snap1 as parent
+        let stats = send_and_receive_piped(&snap2, Some(&snap1), &dest).unwrap();
+        assert!(stats.bytes > 0);
+
+        let received = dest.join("snap2");
+        assert!(is_subvolume(&received).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(received.join("file1.txt")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(received.join("file2.txt")).unwrap(),
+            "second"
+        );
+    }
+
+    // --- Atomic replace operations ---
+
+    #[test]
+    fn test_btrfs_send_and_replace_safely_new() {
+        let td = require_btrfs_test_dir!("send_replace_new");
+
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+        write_test_file(&src, "f.txt", "content");
+
+        let snap = td.path.join("snap");
+        create_snapshot(&src, &snap).unwrap();
+
+        let dest = td.path.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let stats =
+            send_and_replace_safely(&snap, None, &dest, "old", Some("target")).unwrap();
+        assert!(stats.bytes > 0);
+
+        let target = dest.join("target");
+        assert!(is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(target.join("f.txt")).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn test_btrfs_send_and_replace_safely_existing() {
+        let td = require_btrfs_test_dir!("send_replace_exist");
+
+        // Create initial target via send
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+        write_test_file(&src, "v1.txt", "v1");
+
+        let snap1 = td.path.join("snap1");
+        create_snapshot(&src, &snap1).unwrap();
+
+        let dest = td.path.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        send_and_replace_safely(&snap1, None, &dest, "old", Some("target")).unwrap();
+
+        // Now update and replace
+        write_test_file(&src, "v2.txt", "v2");
+        let snap2 = td.path.join("snap2");
+        create_snapshot(&src, &snap2).unwrap();
+
+        send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target"))
+            .unwrap();
+
+        let target = dest.join("target");
+        assert!(is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(target.join("v2.txt")).unwrap(),
+            "v2"
+        );
+
+        // No .old residue
+        assert!(!dest.join("target.old").exists());
+    }
+
+    #[test]
+    fn test_btrfs_snapshot_and_replace_safely() {
+        let td = require_btrfs_test_dir!("snap_replace");
+
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+        write_test_file(&src, "data.txt", "hello");
+
+        let snap = td.path.join("snap");
+        create_snapshot(&src, &snap).unwrap();
+
+        let target = td.path.join("target");
+
+        snapshot_and_replace_safely(&target, &snap, "old").unwrap();
+        assert!(is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(target.join("data.txt")).unwrap(),
+            "hello"
+        );
+
+        // Replace again to exercise existing-target path
+        write_test_file(&src, "data2.txt", "world");
+        let snap2 = td.path.join("snap2");
+        create_snapshot(&src, &snap2).unwrap();
+
+        snapshot_and_replace_safely(&target, &snap2, "old").unwrap();
+        assert!(is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(target.join("data2.txt")).unwrap(),
+            "world"
+        );
+        assert!(!td.path.join("target.old").exists());
+    }
+
+    #[test]
+    fn test_btrfs_move_and_replace_safely() {
+        let td = require_btrfs_test_dir!("move_replace");
+
+        let src = td.path.join("src");
+        create_subvolume(&src).unwrap();
+        write_test_file(&src, "orig.txt", "orig");
+
+        // Create initial target
+        let target = td.path.join("target");
+        create_subvolume(&target).unwrap();
+        write_test_file(&target, "old.txt", "old");
+
+        // Create new subvolume to replace target with
+        let new_sv = td.path.join("new_sv");
+        create_subvolume(&new_sv).unwrap();
+        write_test_file(&new_sv, "new.txt", "new");
+
+        move_and_replace_safely(&target, &new_sv, "old").unwrap();
+
+        assert!(!new_sv.exists());
+        assert!(is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(target.join("new.txt")).unwrap(),
+            "new"
+        );
+        assert!(!td.path.join("target.old").exists());
+    }
+
+    #[test]
+    fn test_btrfs_move_and_replace_safely_no_target() {
+        let td = require_btrfs_test_dir!("move_replace_notarget");
+
+        let target = td.path.join("target");
+        let new_sv = td.path.join("new_sv");
+        create_subvolume(&new_sv).unwrap();
+        write_test_file(&new_sv, "file.txt", "data");
+
+        move_and_replace_safely(&target, &new_sv, "old").unwrap();
+
+        assert!(!new_sv.exists());
+        assert!(is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(target.join("file.txt")).unwrap(),
+            "data"
+        );
+    }
 }

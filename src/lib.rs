@@ -8,6 +8,9 @@ pub mod hooks;
 pub mod liveboot;
 pub mod ui;
 
+#[cfg(test)]
+pub(crate) mod test_util;
+
 // Re-exports for convenient usage
 pub use cli::Cli;
 pub use config::Config;

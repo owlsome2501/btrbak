@@ -7,21 +7,21 @@ use std::process::Command;
 use std::str;
 
 /// Determine the root filesystem path within the live boot environment.
-/// The root filesystem is at `<live_root>/<root_vol>` (e.g. `@/root_vol`).
-fn find_root_vol_path(live_root: &Path, config: &crate::config::Config) -> PathBuf {
+/// The root filesystem is at `<live_boot_path>/<root_vol>` (e.g. `@/root_vol`).
+fn find_root_vol_path(live_boot_path: &Path, config: &crate::config::Config) -> PathBuf {
     for source in &config.sources {
         if source.path == Path::new("/") {
             let vol_name = btrfs::get_subvolume_name_with_suffix(&source.path);
-            return live_root.join(vol_name);
+            return live_boot_path.join(vol_name);
         }
     }
     // Fallback if no source has path "/"
-    live_root.join("root_vol")
+    live_boot_path.join("root_vol")
 }
 
 /// Execute post-backup hooks
 pub fn run_hooks(
-    live_root: &Path,
+    live_boot_path: &Path,
     target_mount: &Path,
     esp_path: &Path,
     hook_config: &crate::config::HookConfig,
@@ -29,9 +29,9 @@ pub fn run_hooks(
     config: &crate::config::Config,
 ) -> Result<(), BackupError> {
     // All hooks that access root filesystem files need the root_vol path,
-    // not the live root directly. The live root (@) contains subvolumes
+    // not the live boot path directly. The live boot (@) contains subvolumes
     // like root_vol, home_vol, etc. The actual root filesystem is root_vol.
-    let root_vol_path = find_root_vol_path(live_root, config);
+    let root_vol_path = find_root_vol_path(live_boot_path, config);
 
     if hook_config.copy_kernel {
         ui::substep("Copying kernel and initramfs to ESP");
@@ -114,7 +114,10 @@ fn copy_kernel_to_esp(
             initramfs_dest.display()
         ));
     } else {
-        ui::warning(&format!("Initramfs not found at: {}", initramfs_source.display()));
+        ui::warning(&format!(
+            "Initramfs not found at: {}",
+            initramfs_source.display()
+        ));
     }
 
     // Copy fallback initramfs if exists
@@ -140,7 +143,10 @@ fn copy_kernel_to_esp(
                 ucode_dest.display()
             ));
         } else {
-            ui::warning(&format!("Microcode not found at: {}", ucode_source.display()));
+            ui::warning(&format!(
+                "Microcode not found at: {}",
+                ucode_source.display()
+            ));
         }
     }
 
@@ -162,7 +168,10 @@ fn regenerate_fstab(
     // Backup old fstab if exists
     if fstab_path.exists() {
         let backup_path = fstab_path.with_extension("backup");
-        ui::detail(&format!("Backing up existing fstab to: {}", backup_path.display()));
+        ui::detail(&format!(
+            "Backing up existing fstab to: {}",
+            backup_path.display()
+        ));
         fs::copy(&fstab_path, &backup_path)?;
     }
 
@@ -289,8 +298,8 @@ fn get_device_uuid(mount_point: &Path) -> Result<String, BackupError> {
 /// Remove snapper configuration from live boot environment
 ///
 /// Removes config files from `etc/snapper/configs` and disables snapper systemd services.
-fn remove_snapper_config(live_root: &Path) -> Result<(), BackupError> {
-    let snapper_config_dir = live_root.join("etc/snapper/configs");
+fn remove_snapper_config(live_boot_path: &Path) -> Result<(), BackupError> {
+    let snapper_config_dir = live_boot_path.join("etc/snapper/configs");
 
     if snapper_config_dir.exists() {
         // Remove all snapper configs
@@ -308,13 +317,13 @@ fn remove_snapper_config(live_root: &Path) -> Result<(), BackupError> {
 
     // Also disable snapper service if present
     let snapper_service =
-        live_root.join("etc/systemd/system/multi-user.target.wants/snapper-cleanup.service");
+        live_boot_path.join("etc/systemd/system/multi-user.target.wants/snapper-cleanup.service");
     if snapper_service.exists() {
         let _ = fs::remove_file(&snapper_service);
     }
 
     let snapper_timer =
-        live_root.join("etc/systemd/system/timers.target.wants/snapper-cleanup.timer");
+        live_boot_path.join("etc/systemd/system/timers.target.wants/snapper-cleanup.timer");
     if snapper_timer.exists() {
         let _ = fs::remove_file(&snapper_timer);
     }
@@ -403,15 +412,15 @@ mod tests {
                 location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
                 enable_live_boot: false,
                 snapshot_subvolume: None,
-                live_root_subvolume: None,
+                live_boot_subvolume: None,
                 encryption: None,
             },
             live_boot: None,
             hooks: HookConfig::default(),
         };
 
-        let live_root = Path::new("/mnt/@");
-        let result = find_root_vol_path(live_root, &config);
+        let live_boot_path = Path::new("/mnt/@");
+        let result = find_root_vol_path(live_boot_path, &config);
         assert_eq!(result, PathBuf::from("/mnt/@/root_vol"));
     }
 
@@ -430,15 +439,15 @@ mod tests {
                 location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
                 enable_live_boot: false,
                 snapshot_subvolume: None,
-                live_root_subvolume: None,
+                live_boot_subvolume: None,
                 encryption: None,
             },
             live_boot: None,
             hooks: HookConfig::default(),
         };
 
-        let live_root = Path::new("/mnt/@");
-        let result = find_root_vol_path(live_root, &config);
+        let live_boot_path = Path::new("/mnt/@");
+        let result = find_root_vol_path(live_boot_path, &config);
         // No "/" source, should fallback to "root_vol"
         assert_eq!(result, PathBuf::from("/mnt/@/root_vol"));
     }
@@ -535,7 +544,7 @@ mod tests {
                 location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
                 enable_live_boot: true,
                 snapshot_subvolume: None,
-                live_root_subvolume: None,
+                live_boot_subvolume: None,
                 encryption: None,
             },
             live_boot: None,
@@ -576,7 +585,7 @@ mod tests {
                 location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
                 enable_live_boot: true,
                 snapshot_subvolume: None,
-                live_root_subvolume: None,
+                live_boot_subvolume: None,
                 encryption: None,
             },
             live_boot: None,

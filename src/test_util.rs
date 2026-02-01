@@ -1,7 +1,7 @@
 use crate::config::*;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -122,9 +122,7 @@ macro_rules! require_btrfs_test_dir {
         match crate::test_util::BtrfsTestDir::new($name) {
             Some(td) => td,
             None => {
-                eprintln!(
-                    "Skipped: BTRBAK_TEST_BTRFS_DIR not set or insufficient privileges"
-                );
+                eprintln!("Skipped: BTRBAK_TEST_BTRFS_DIR not set or insufficient privileges");
                 return;
             }
         }
@@ -141,9 +139,7 @@ macro_rules! require_btrfs_recv_dir {
         match crate::test_util::BtrfsTestDir::new_recv($name) {
             Some(td) => td,
             None => {
-                eprintln!(
-                    "Skipped: BTRBAK_TEST_BTRFS_RECV_DIR not set or insufficient privileges"
-                );
+                eprintln!("Skipped: BTRBAK_TEST_BTRFS_RECV_DIR not set or insufficient privileges");
                 return;
             }
         }
@@ -168,7 +164,7 @@ pub fn make_target_config(path: &Path) -> TargetConfig {
         location: TargetLocation::MountedPath(path.to_path_buf()),
         enable_live_boot: false,
         snapshot_subvolume: None,
-        live_root_subvolume: None,
+        live_boot_subvolume: None,
         encryption: None,
     }
 }

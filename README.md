@@ -26,9 +26,13 @@ A Rust tool for creating incremental Btrfs backups of multiple directories with 
 ```bash
 # Install from source
 cargo install --path .
+# or
+make install
 
 # Or build locally
 cargo build --release
+# or
+make release
 ```
 
 ### Basic Configuration
@@ -80,6 +84,13 @@ btrbak backup --dry-run
 
 # Prepare live boot environment (initial setup)
 btrbak prepare-live
+
+# Specify a custom config file (default: btrbak.toml)
+btrbak backup -c /path/to/config.toml
+
+# Verbose / quiet output
+btrbak -v backup    # show all details
+btrbak -q backup    # errors only
 ```
 
 **Configuration Validation Tips:**
@@ -164,9 +175,9 @@ enable_live_boot = false
 # Default: "@snapshots" if live boot enabled, "." (root subvolume) otherwise
 snapshot_subvolume = "@snapshots"
 
-# Optional: subvolume name for live boot root environment
+# Optional: subvolume name for live boot environment
 # Default: "@"
-live_root_subvolume = "@"
+live_boot_subvolume = "@"
 
 # Optional: LUKS encryption configuration
 [target.encryption]
@@ -233,11 +244,11 @@ bootloader = "SystemdBoot"
 # Default: "Backup Environment"
 title = "Backup Environment"
 
-# Optional: kernel path (relative to live boot root)
+# Optional: kernel path (relative to live boot root vol)
 # Default: "/boot/vmlinuz-linux"
 kernel = "/boot/vmlinuz-linux"
 
-# Optional: initramfs path (relative to live boot root)
+# Optional: initramfs path (relative to live boot root vol)
 # Default: "/boot/initramfs-linux.img"
 initramfs = "/boot/initramfs-linux.img"
 
@@ -439,7 +450,7 @@ btrfs send -p /source/.snapshots/btrbak_prev /source/.snapshots/btrbak | btrfs r
 ### Live Boot Environment Management
 
 **Initial Setup (`prepare-live` command):**
-1. Creates `@` (live root) and `@snapshots` (backup storage) subvolumes
+1. Creates `@` (live boot) and `@snapshots` (backup storage) subvolumes
 2. Initializes systemd-boot on the ESP partition
 3. Creates bootloader entry with correct kernel parameters
 
@@ -510,26 +521,52 @@ The tool maintains consistent naming across source and target:
 
 ## Testing
 
-Run the comprehensive test suite:
+A `Makefile` is provided for common tasks:
 
 ```bash
-# Run all tests
-cargo test
-
-# Run library tests only
-cargo test --lib
-
-# Build with all warnings
-cargo clippy -- -D warnings
+make build           # cargo build
+make release         # cargo build --release
+make check           # cargo check
+make clippy          # cargo clippy -- -D warnings
+make fmt             # cargo fmt
+make fmt-check       # cargo fmt -- --check
+make test            # unit tests (no root required)
+make test-integration  # integration tests (requires sudo & btrfs-progs)
+make clean           # cargo clean
+make install         # cargo install --path .
 ```
 
-**Test coverage includes:**
-- Configuration parsing and validation
-- Error type conversions and display
-- Default value correctness
-- File I/O operations with temporary files
+### Unit tests
 
-Integration tests requiring external commands (btrfs, cryptsetup, etc.) are not included to avoid impacting real systems during development.
+Unit tests cover configuration parsing, error handling, UI formatting, volume naming,
+and other logic that does not require a real btrfs filesystem:
+
+```bash
+make test
+# or
+cargo test
+```
+
+### Integration tests
+
+Integration tests exercise real btrfs operations (subvolume create/delete, snapshot,
+send/receive, incremental backup) on temporary img-backed btrfs filesystems.
+
+```bash
+make test-integration
+```
+
+The script `scripts/test-integration.sh` handles all setup and teardown automatically:
+
+1. Creates two sparse img files (default 512 MB each, configurable via `IMG_SIZE`)
+2. Formats them as btrfs and loop-mounts them via `sudo`
+3. Runs `cargo test` with `BTRBAK_TEST_BTRFS_DIR` and `BTRBAK_TEST_BTRFS_RECV_DIR` set
+4. Unmounts and removes the img files on exit
+
+Root privileges (`sudo`) are only used for filesystem setup and teardown.
+If `sudo` is unavailable the script exits cleanly and integration tests are skipped.
+Tests that require btrfs privileges also detect this at runtime and skip automatically,
+so a plain `cargo test` always succeeds regardless of the environment.
 
 ## Security Considerations
 
@@ -540,9 +577,9 @@ Integration tests requiring external commands (btrfs, cryptsetup, etc.) are not 
 
 ## Contributing
 
-1. Ensure all tests pass: `cargo test`
-2. Check code quality: `cargo clippy -- -D warnings`
-3. Maintain consistent formatting
+1. Ensure all tests pass: `make test`
+2. Check code quality: `make clippy`
+3. Check formatting: `make fmt-check`
 4. Add tests for new functionality
 5. Update documentation for any configuration changes
 

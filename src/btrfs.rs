@@ -33,7 +33,11 @@ pub fn is_subvolume(path: &Path) -> Result<bool, BackupError> {
 /// Create a read-only snapshot of a subvolume
 pub fn create_snapshot(source: &Path, dest: &Path) -> Result<(), BackupError> {
     let mut cmd = Command::new("btrfs");
-    cmd.arg("subvolume").arg("snapshot").arg("-r").arg(source).arg(dest);
+    cmd.arg("subvolume")
+        .arg("snapshot")
+        .arg("-r")
+        .arg(source)
+        .arg(dest);
     ui::cmd_start(&ui::format_cmd(&cmd));
 
     let output = cmd.output()?;
@@ -239,7 +243,11 @@ pub fn send_and_receive_piped(
     } else {
         format!("btrfs send {}", source.display())
     };
-    ui::cmd_start(&format!("{} | btrfs receive {}", send_part, dest_dir.display()));
+    ui::cmd_start(&format!(
+        "{} | btrfs receive {}",
+        send_part,
+        dest_dir.display()
+    ));
 
     let mut send_child = send_subvolume_process(source, parent)?;
     let mut recv_child = receive_subvolume_process(dest_dir)?;
@@ -523,9 +531,7 @@ pub fn send_and_replace_safely(
     }
 
     // Rename received subvolume to target name if needed
-    if needs_rename
-        && let Err(e) = rename_subvolume(&received_path, &target_path)
-    {
+    if needs_rename && let Err(e) = rename_subvolume(&received_path, &target_path) {
         let _ = delete_subvolume(&received_path);
         restore_renamed();
         return Err(e);
@@ -714,10 +720,7 @@ mod tests {
 
     #[test]
     fn test_subvolume_name_suffix_root() {
-        assert_eq!(
-            get_subvolume_name_with_suffix(Path::new("/")),
-            "root_vol"
-        );
+        assert_eq!(get_subvolume_name_with_suffix(Path::new("/")), "root_vol");
     }
 
     #[test]
@@ -738,10 +741,7 @@ mod tests {
 
     #[test]
     fn test_subvolume_name_suffix_dot() {
-        assert_eq!(
-            get_subvolume_name_with_suffix(Path::new(".")),
-            "root_vol"
-        );
+        assert_eq!(get_subvolume_name_with_suffix(Path::new(".")), "root_vol");
     }
 
     // get_subvolume_name() tests
@@ -909,10 +909,7 @@ mod tests {
 
         // Writing to read-write snapshot should succeed
         std::fs::write(snap.join("new.txt"), "ok").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(snap.join("new.txt")).unwrap(),
-            "ok"
-        );
+        assert_eq!(std::fs::read_to_string(snap.join("new.txt")).unwrap(), "ok");
     }
 
     // --- find_latest_snapshot ---
@@ -1062,8 +1059,7 @@ mod tests {
         let dest = td_recv.path.join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
-        let stats =
-            send_and_replace_safely(&snap, None, &dest, "old", Some("target")).unwrap();
+        let stats = send_and_replace_safely(&snap, None, &dest, "old", Some("target")).unwrap();
         assert!(stats.bytes > 0);
 
         let target = dest.join("target");
@@ -1097,8 +1093,7 @@ mod tests {
         let snap2 = td.path.join("snap2");
         create_snapshot(&src, &snap2).unwrap();
 
-        send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target"))
-            .unwrap();
+        send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target")).unwrap();
 
         let target = dest.join("target");
         assert!(is_subvolume(&target).unwrap());

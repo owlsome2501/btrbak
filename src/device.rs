@@ -136,7 +136,10 @@ pub fn open_luks_device(
             ))
         })?;
 
-        ui::cmd_start(&format!("cryptsetup open --key-file - {} {}", device, mapping_name));
+        ui::cmd_start(&format!(
+            "cryptsetup open --key-file - {} {}",
+            device, mapping_name
+        ));
 
         // Use stdin for passphrase
         let mut child = Command::new("cryptsetup")
@@ -271,14 +274,21 @@ impl Drop for MountGuard {
         if self.temp_dir.is_some()
             && let Err(e) = unmount(&self.mount_point)
         {
-            ui::warning(&format!("Failed to unmount {}: {}", self.mount_point.display(), e));
+            ui::warning(&format!(
+                "Failed to unmount {}: {}",
+                self.mount_point.display(),
+                e
+            ));
         }
 
         // Close LUKS mapping if exists
         if let Some(mapping_name) = &self.luks_mapping
             && let Err(e) = close_luks_device(mapping_name)
         {
-            ui::warning(&format!("Failed to close LUKS mapping {}: {}", mapping_name, e));
+            ui::warning(&format!(
+                "Failed to close LUKS mapping {}: {}",
+                mapping_name, e
+            ));
         }
     }
 }

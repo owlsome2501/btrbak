@@ -68,10 +68,7 @@ pub fn header(msg: &str) {
         return;
     }
     let style = Style::new().bold().cyan();
-    println_stderr(format!(
-        "\n{}\n",
-        style.apply_to(format!("== {} ==", msg))
-    ));
+    println_stderr(format!("\n{}\n", style.apply_to(format!("== {} ==", msg))));
 }
 
 /// `[{cur}/{total}] {msg}` (bold)
@@ -104,10 +101,7 @@ pub fn success(msg: &str) {
         return;
     }
     let style = Style::new().green();
-    println_stderr(format!(
-        "  {}",
-        style.apply_to(format!("\u{2713} {}", msg))
-    ));
+    println_stderr(format!("  {}", style.apply_to(format!("\u{2713} {}", msg))));
 }
 
 /// `  {msg}`
@@ -132,19 +126,13 @@ pub fn detail(msg: &str) {
 /// `  ⚠ {msg}` (yellow) - always shown
 pub fn warning(msg: &str) {
     let style = Style::new().yellow();
-    println_stderr(format!(
-        "  {}",
-        style.apply_to(format!("\u{26a0} {}", msg))
-    ));
+    println_stderr(format!("  {}", style.apply_to(format!("\u{26a0} {}", msg))));
 }
 
 /// `  ✗ {msg}` (red) - always shown
 pub fn error(msg: &str) {
     let style = Style::new().red();
-    println_stderr(format!(
-        "  {}",
-        style.apply_to(format!("\u{2717} {}", msg))
-    ));
+    println_stderr(format!("  {}", style.apply_to(format!("\u{2717} {}", msg))));
 }
 
 /// Error with indented hint lines - always shown
@@ -170,10 +158,7 @@ pub fn cmd_start(cmd_str: &str) {
         return;
     }
     let style = Style::new().dim().cyan();
-    println_stderr(format!(
-        "  {}",
-        style.apply_to(format!("$ {}", cmd_str))
-    ));
+    println_stderr(format!("  {}", style.apply_to(format!("$ {}", cmd_str))));
 }
 
 /// `    stderr: {line}` (yellow) for each line
@@ -257,8 +242,7 @@ pub fn start_transfer() -> TransferProgress {
     let bar = if s.is_tty && s.verbosity != Verbosity::Quiet {
         let bar = s.mp.add(ProgressBar::new_spinner());
         bar.set_style(
-            ProgressStyle::with_template("    {spinner:.cyan.dim} {msg:.cyan.dim}")
-                .unwrap(),
+            ProgressStyle::with_template("    {spinner:.cyan.dim} {msg:.cyan.dim}").unwrap(),
         );
         bar.enable_steady_tick(std::time::Duration::from_millis(100));
         bar

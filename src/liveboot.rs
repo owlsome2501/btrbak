@@ -9,20 +9,26 @@ use std::process::Command;
 pub fn prepare_live_boot(
     btrfs_mount: &Path,
     config: &LiveBootConfig,
-    live_root_subvolume: &str,
+    live_boot_subvolume: &str,
     snapshot_subvolume: &str,
 ) -> Result<(), BackupError> {
     // Create subvolumes if they don't exist
     let snapshots_subvol = btrfs_mount.join(snapshot_subvolume);
-    let root_subvol = btrfs_mount.join(live_root_subvolume);
+    let root_subvol = btrfs_mount.join(live_boot_subvolume);
 
     if !snapshots_subvol.exists() {
-        ui::substep(&format!("Creating snapshots subvolume: {}", snapshot_subvolume));
+        ui::substep(&format!(
+            "Creating snapshots subvolume: {}",
+            snapshot_subvolume
+        ));
         btrfs::create_subvolume(&snapshots_subvol)?;
     }
 
     if !root_subvol.exists() {
-        ui::substep(&format!("Creating live root subvolume: {}", live_root_subvolume));
+        ui::substep(&format!(
+            "Creating live boot subvolume: {}",
+            live_boot_subvolume
+        ));
         btrfs::create_subvolume(&root_subvol)?;
     }
 
@@ -35,7 +41,7 @@ pub fn prepare_live_boot(
             btrfs_mount,
             &config.esp_path,
             &config.boot_entry,
-            live_root_subvolume,
+            live_boot_subvolume,
         )?;
     }
 
@@ -68,22 +74,18 @@ fn create_boot_entry(
     btrfs_mount: &Path,
     esp_path: &Path,
     entry_config: &BootEntryConfig,
-    live_root_subvolume: &str,
+    live_boot_subvolume: &str,
 ) -> Result<(), BackupError> {
     // Determine root device and subvolume
     let root_device = find_btrfs_device(btrfs_mount)?;
-    // The root filesystem is at <live_root_subvolume>/root_vol (e.g. @/root_vol)
-    let subvolume_path = format!("{}/root_vol", live_root_subvolume);
+    // The root filesystem is at <live_boot_subvolume>/root_vol (e.g. @/root_vol)
+    let subvolume_path = format!("{}/root_vol", live_boot_subvolume);
 
     // Filter user options to avoid duplicating root=, rootflags=, and rw
     let mut options: Vec<String> = entry_config
         .options
         .iter()
-        .filter(|opt| {
-            !opt.starts_with("root=")
-                && !opt.starts_with("rootflags=")
-                && *opt != "rw"
-        })
+        .filter(|opt| !opt.starts_with("root=") && !opt.starts_with("rootflags=") && *opt != "rw")
         .cloned()
         .collect();
     options.push(format!("root=UUID={}", root_device));

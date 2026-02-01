@@ -66,7 +66,9 @@ impl BackupError {
             BackupError::Mount(msg) => {
                 let mut hints = Vec::new();
                 if msg.contains("LUKS") || msg.contains("luks") {
-                    hints.push("Verify the device is a valid LUKS container: 'cryptsetup isLuks <device>'");
+                    hints.push(
+                        "Verify the device is a valid LUKS container: 'cryptsetup isLuks <device>'",
+                    );
                     hints.push("Check that the keyfile exists and is readable");
                 }
                 if msg.contains("not a LUKS") {
@@ -84,20 +86,18 @@ impl BackupError {
                 }
                 hints
             }
-            BackupError::Io(err) => {
-                match err.kind() {
-                    std::io::ErrorKind::PermissionDenied => {
-                        vec!["Try running with sudo or as root"]
-                    }
-                    std::io::ErrorKind::NotFound => {
-                        vec!["Check that the file or directory path is correct"]
-                    }
-                    std::io::ErrorKind::AlreadyExists => {
-                        vec!["A file or directory already exists at the target path"]
-                    }
-                    _ => vec![],
+            BackupError::Io(err) => match err.kind() {
+                std::io::ErrorKind::PermissionDenied => {
+                    vec!["Try running with sudo or as root"]
                 }
-            }
+                std::io::ErrorKind::NotFound => {
+                    vec!["Check that the file or directory path is correct"]
+                }
+                std::io::ErrorKind::AlreadyExists => {
+                    vec!["A file or directory already exists at the target path"]
+                }
+                _ => vec![],
+            },
             BackupError::Config(_) => {
                 vec![
                     "Check your configuration file for syntax errors",
@@ -273,9 +273,11 @@ mod tests {
     fn test_hints_bootloader_systemd_boot() {
         let err = BackupError::Bootloader("systemd-boot configuration failed".to_string());
         let hints = err.hints();
-        assert!(hints
-            .iter()
-            .any(|h| h.contains("systemd-boot is installed")));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("systemd-boot is installed"))
+        );
     }
 
     #[test]
@@ -291,18 +293,22 @@ mod tests {
     fn test_hints_hook_uuid() {
         let err = BackupError::Hook("Failed to get UUID for mount".to_string());
         let hints = err.hints();
-        assert!(hints
-            .iter()
-            .any(|h| h.contains("target device is properly mounted")));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("target device is properly mounted"))
+        );
     }
 
     #[test]
     fn test_hints_hook_kernel() {
         let err = BackupError::Hook("kernel and initramfs copy failed".to_string());
         let hints = err.hints();
-        assert!(hints
-            .iter()
-            .any(|h| h.contains("kernel and initramfs paths")));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("kernel and initramfs paths"))
+        );
     }
 
     #[test]

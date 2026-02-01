@@ -148,10 +148,7 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
 }
 
 /// Print a final summary of all source backup results
-fn print_summary(
-    results: &[(PathBuf, Option<btrfs::TransferStats>)],
-    start: &std::time::Instant,
-) {
+fn print_summary(results: &[(PathBuf, Option<btrfs::TransferStats>)], start: &std::time::Instant) {
     for (path, stats) in results {
         match stats {
             Some(s) => {
@@ -308,7 +305,10 @@ fn create_snapper_local_snapshot(
         )));
     }
 
-    ui::detail(&format!("Using snapper snapshot at: {}", snapshot_path.display()));
+    ui::detail(&format!(
+        "Using snapper snapshot at: {}",
+        snapshot_path.display()
+    ));
 
     // Find previous snapper snapshot with btrbak tag for incremental backup
     let parent_snapshot_path = find_previous_snapper_snapshot(source, snapshot_dir, config_name)?;
@@ -332,7 +332,10 @@ fn create_manual_local_snapshot(
 
     // Clean up old _prev snapshot if it exists
     if prev_path.exists() && btrfs::is_subvolume(&prev_path)? {
-        ui::detail(&format!("Cleaning up old previous snapshot: {}", prev_path.display()));
+        ui::detail(&format!(
+            "Cleaning up old previous snapshot: {}",
+            prev_path.display()
+        ));
         btrfs::delete_subvolume(&prev_path)?;
     }
 
@@ -534,8 +537,8 @@ fn send_snapshot(
 /// Update live boot environment
 fn update_live_environment(config: &Config, target_mount: &Path) -> Result<(), BackupError> {
     if let Some(live_boot_config) = &config.live_boot {
-        let live_root_subvolume = config.target.live_root_subvolume.as_deref().unwrap_or("@");
-        let live_root_path = target_mount.join(live_root_subvolume);
+        let live_boot_subvolume = config.target.live_boot_subvolume.as_deref().unwrap_or("@");
+        let live_boot_path = target_mount.join(live_boot_subvolume);
 
         ui::detail(&format!(
             "Updating live boot for {} sources",
@@ -546,15 +549,12 @@ fn update_live_environment(config: &Config, target_mount: &Path) -> Result<(), B
         for source in &config.sources {
             let subvolume_name = btrfs::get_subvolume_name_with_suffix(&source.path);
 
-            ui::substep(&format!(
-                "Updating live subvolume: {}",
-                subvolume_name
-            ));
+            ui::substep(&format!("Updating live subvolume: {}", subvolume_name));
 
             let snapshot_path = target_mount.join("@snapshots").join(&subvolume_name);
 
             if btrfs::is_subvolume(&snapshot_path)? {
-                update_live_subvolume(&live_root_path, &snapshot_path, &subvolume_name)?;
+                update_live_subvolume(&live_boot_path, &snapshot_path, &subvolume_name)?;
             } else {
                 ui::warning(&format!(
                     "Snapshot subvolume not found at {}, skipping live update for {}",
@@ -567,7 +567,7 @@ fn update_live_environment(config: &Config, target_mount: &Path) -> Result<(), B
         // Run hooks after all sources are updated
         ui::substep("Running post-backup hooks");
         hooks::run_hooks(
-            &live_root_path,
+            &live_boot_path,
             target_mount,
             &live_boot_config.esp_path,
             &config.hooks,
@@ -581,16 +581,19 @@ fn update_live_environment(config: &Config, target_mount: &Path) -> Result<(), B
 
 /// Update a subvolume in live boot environment with latest snapshot
 fn update_live_subvolume(
-    live_root: &Path,
+    live_boot_path: &Path,
     snapshot: &Path,
     volume_name: &str,
 ) -> Result<(), BackupError> {
-    let target_subvolume = live_root.join(volume_name);
+    let target_subvolume = live_boot_path.join(volume_name);
 
     // Create read-write snapshot and replace with atomic renames
     btrfs::snapshot_and_replace_safely(&target_subvolume, snapshot, "old")?;
 
-    ui::detail(&format!("Updated subvolume {} with latest snapshot", volume_name));
+    ui::detail(&format!(
+        "Updated subvolume {} with latest snapshot",
+        volume_name
+    ));
     Ok(())
 }
 
@@ -606,7 +609,10 @@ fn cleanup_old_snapshot(
     } else if let Some(parent_path) = local_parent_snapshot {
         // For manual snapshots, delete the renamed parent snapshot
         if parent_path.exists() && btrfs::is_subvolume(&parent_path)? {
-            ui::detail(&format!("Deleting old local snapshot: {}", parent_path.display()));
+            ui::detail(&format!(
+                "Deleting old local snapshot: {}",
+                parent_path.display()
+            ));
             btrfs::delete_subvolume(&parent_path)?;
         }
     }
@@ -638,7 +644,10 @@ fn cleanup_old_snapper_snapshots(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        ui::warning(&format!("Failed to list snapper snapshots for cleanup: {}", stderr));
+        ui::warning(&format!(
+            "Failed to list snapper snapshots for cleanup: {}",
+            stderr
+        ));
         return Ok(());
     }
 
@@ -722,7 +731,7 @@ pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
 
     // Prepare live boot environment
     ui::step(2, 2, "Setting up live boot");
-    let live_root_subvolume = config.target.live_root_subvolume.as_deref().unwrap_or("@");
+    let live_boot_subvolume = config.target.live_boot_subvolume.as_deref().unwrap_or("@");
     let snapshot_subvolume = config
         .target
         .snapshot_subvolume
@@ -731,7 +740,7 @@ pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
     liveboot::prepare_live_boot(
         mount_guard.mount_point(),
         live_boot_config,
-        live_root_subvolume,
+        live_boot_subvolume,
         snapshot_subvolume,
     )?;
 
@@ -762,7 +771,7 @@ mod tests {
                 location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
                 enable_live_boot,
                 snapshot_subvolume: None,
-                live_root_subvolume: None,
+                live_boot_subvolume: None,
                 encryption: None,
             },
             live_boot: None,
@@ -818,8 +827,8 @@ mod tests {
     // ========================
 
     use crate::test_util::{
-        make_source_config, make_target_config, require_btrfs_recv_dir,
-        require_btrfs_test_dir, write_test_file,
+        make_source_config, make_target_config, require_btrfs_recv_dir, require_btrfs_test_dir,
+        write_test_file,
     };
 
     // --- Local snapshot (manual) ---
@@ -842,10 +851,7 @@ mod tests {
 
         assert!(btrfs::is_subvolume(&snap_path).unwrap());
         assert!(parent.is_none());
-        assert_eq!(
-            fs::read_to_string(snap_path.join("a.txt")).unwrap(),
-            "aaa"
-        );
+        assert_eq!(fs::read_to_string(snap_path.join("a.txt")).unwrap(), "aaa");
     }
 
     #[test]
@@ -862,8 +868,7 @@ mod tests {
         let source = make_source_config(&src, Path::new("snaps"));
 
         // First snapshot
-        let (snap1, _) =
-            create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+        let (snap1, _) = create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
         assert!(btrfs::is_subvolume(&snap1).unwrap());
 
         // Update source
@@ -890,19 +895,16 @@ mod tests {
         let source = make_source_config(&src, Path::new("snaps"));
 
         // Round 1: creates btrbak_test
-        let (_s1, _) =
-            create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+        let (_s1, _) = create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
 
         // Round 2: renames round-1 snapshot to btrbak_test_prev, creates new btrbak_test
-        let (_s2, prev2) =
-            create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+        let (_s2, prev2) = create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
         let prev2_path = prev2.unwrap();
         // prev2_path holds the round-1 snapshot; capture its subvolume ID
         let prev2_id = btrfs::get_subvolume_id(&prev2_path).unwrap();
 
         // Round 3: deletes old _prev (round-1), renames round-2 to _prev, creates new
-        let (_s3, prev3) =
-            create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+        let (_s3, prev3) = create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
 
         // The path btrbak_test_prev still exists, but it now holds a DIFFERENT
         // subvolume (the round-2 snapshot), confirming the old _prev was deleted.
@@ -974,8 +976,7 @@ mod tests {
         let source = make_source_config(&src, Path::new(".snapshots"));
         let target_config = make_target_config(&target_dir);
 
-        let stats =
-            send_snapshot(&source, &target_config, &snap, None, &target_dir).unwrap();
+        let stats = send_snapshot(&source, &target_config, &snap, None, &target_dir).unwrap();
         assert!(stats.bytes > 0);
 
         // The sent subvolume should be named with _vol suffix
@@ -1034,8 +1035,7 @@ mod tests {
         let source = make_source_config(&src, Path::new(".snapshots"));
         let target_config = make_target_config(&target_dir);
 
-        let stats =
-            backup_single_source(&source, &target_config, &target_dir, "test").unwrap();
+        let stats = backup_single_source(&source, &target_config, &target_dir, "test").unwrap();
         assert!(stats.bytes > 0);
 
         // Target should contain the volume
@@ -1066,16 +1066,12 @@ mod tests {
         write_test_file(&src, "v2.txt", "v2");
 
         // Second backup (incremental)
-        let stats =
-            backup_single_source(&source, &target_config, &target_dir, "test").unwrap();
+        let stats = backup_single_source(&source, &target_config, &target_dir, "test").unwrap();
         assert!(stats.bytes > 0);
 
         let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
         let target_vol = target_dir.join(&vol_name);
         assert!(btrfs::is_subvolume(&target_vol).unwrap());
-        assert_eq!(
-            fs::read_to_string(target_vol.join("v2.txt")).unwrap(),
-            "v2"
-        );
+        assert_eq!(fs::read_to_string(target_vol.join("v2.txt")).unwrap(), "v2");
     }
 }

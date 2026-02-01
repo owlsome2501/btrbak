@@ -58,9 +58,9 @@ pub struct TargetConfig {
     /// Subvolume name for snapshots (default: "@snapshots" if live boot enabled, else ".")
     #[serde(default)]
     pub snapshot_subvolume: Option<String>,
-    /// Subvolume name for live boot root (default: "@")
+    /// Subvolume name for live boot (default: "@")
     #[serde(default)]
-    pub live_root_subvolume: Option<String>,
+    pub live_boot_subvolume: Option<String>,
     /// Encryption configuration for target device (optional)
     #[serde(default)]
     pub encryption: Option<EncryptionConfig>,
@@ -307,7 +307,7 @@ mod tests {
                 location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
                 enable_live_boot: false,
                 snapshot_subvolume: None,
-                live_root_subvolume: None,
+                live_boot_subvolume: None,
                 encryption: None,
             },
             live_boot: None,
@@ -702,7 +702,7 @@ mod tests {
                 location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
                 enable_live_boot: false,
                 snapshot_subvolume: None,
-                live_root_subvolume: None,
+                live_boot_subvolume: None,
                 encryption: None,
             },
             live_boot: None,
@@ -722,7 +722,7 @@ mod tests {
                 location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
                 enable_live_boot: false,
                 snapshot_subvolume: None,
-                live_root_subvolume: None,
+                live_boot_subvolume: None,
                 encryption: None,
             },
             live_boot: None,
@@ -730,10 +730,12 @@ mod tests {
         };
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No source configurations"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No source configurations")
+        );
     }
 
     #[test]

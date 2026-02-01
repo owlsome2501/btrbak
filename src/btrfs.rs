@@ -774,7 +774,7 @@ mod tests {
     // Integration tests (require BTRBAK_TEST_BTRFS_DIR)
     // ========================
 
-    use crate::test_util::{require_btrfs_test_dir, write_test_file};
+    use crate::test_util::{require_btrfs_recv_dir, require_btrfs_test_dir, write_test_file};
 
     // --- Subvolume basic operations ---
 
@@ -981,6 +981,7 @@ mod tests {
     #[test]
     fn test_btrfs_send_and_receive_piped() {
         let td = require_btrfs_test_dir!("send_recv_piped");
+        let td_recv = require_btrfs_recv_dir!("send_recv_piped");
 
         let src = td.path.join("src");
         create_subvolume(&src).unwrap();
@@ -990,7 +991,7 @@ mod tests {
         let snap = td.path.join("snap");
         create_snapshot(&src, &snap).unwrap();
 
-        let dest = td.path.join("dest");
+        let dest = td_recv.path.join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
         let stats = send_and_receive_piped(&snap, None, &dest).unwrap();
@@ -1008,6 +1009,7 @@ mod tests {
     #[test]
     fn test_btrfs_send_and_receive_incremental() {
         let td = require_btrfs_test_dir!("send_recv_incr");
+        let td_recv = require_btrfs_recv_dir!("send_recv_incr");
 
         let src = td.path.join("src");
         create_subvolume(&src).unwrap();
@@ -1016,7 +1018,7 @@ mod tests {
         let snap1 = td.path.join("snap1");
         create_snapshot(&src, &snap1).unwrap();
 
-        let dest = td.path.join("dest");
+        let dest = td_recv.path.join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
         // Full send of snap1
@@ -1048,6 +1050,7 @@ mod tests {
     #[test]
     fn test_btrfs_send_and_replace_safely_new() {
         let td = require_btrfs_test_dir!("send_replace_new");
+        let td_recv = require_btrfs_recv_dir!("send_replace_new");
 
         let src = td.path.join("src");
         create_subvolume(&src).unwrap();
@@ -1056,7 +1059,7 @@ mod tests {
         let snap = td.path.join("snap");
         create_snapshot(&src, &snap).unwrap();
 
-        let dest = td.path.join("dest");
+        let dest = td_recv.path.join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
         let stats =
@@ -1074,6 +1077,7 @@ mod tests {
     #[test]
     fn test_btrfs_send_and_replace_safely_existing() {
         let td = require_btrfs_test_dir!("send_replace_exist");
+        let td_recv = require_btrfs_recv_dir!("send_replace_exist");
 
         // Create initial target via send
         let src = td.path.join("src");
@@ -1083,7 +1087,7 @@ mod tests {
         let snap1 = td.path.join("snap1");
         create_snapshot(&src, &snap1).unwrap();
 
-        let dest = td.path.join("dest");
+        let dest = td_recv.path.join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
         send_and_replace_safely(&snap1, None, &dest, "old", Some("target")).unwrap();

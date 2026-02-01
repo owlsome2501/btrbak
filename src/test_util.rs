@@ -4,17 +4,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// RAII guard that creates a unique subdirectory under `BTRBAK_TEST_BTRFS_DIR`
+/// RAII guard that creates a unique subdirectory under a btrfs test filesystem
 /// and recursively cleans up all btrfs subvolumes + files on drop.
 pub struct BtrfsTestDir {
     pub path: PathBuf,
 }
 
 impl BtrfsTestDir {
-    /// Create a new test directory. Returns `None` if `BTRBAK_TEST_BTRFS_DIR` is
-    /// not set, signalling the caller to skip the test.
+    /// Create a test directory on the **source** filesystem (`BTRBAK_TEST_BTRFS_DIR`).
+    /// Returns `None` if the env var is not set (caller should skip).
     pub fn new(test_name: &str) -> Option<Self> {
-        let base = match std::env::var("BTRBAK_TEST_BTRFS_DIR") {
+        Self::from_env("BTRBAK_TEST_BTRFS_DIR", test_name)
+    }
+
+    /// Create a test directory on the **receive / target** filesystem
+    /// (`BTRBAK_TEST_BTRFS_RECV_DIR`).  Must be a *different* btrfs filesystem
+    /// from `BTRBAK_TEST_BTRFS_DIR` so that send/receive crosses filesystem
+    /// boundaries, matching real backup scenarios.
+    pub fn new_recv(test_name: &str) -> Option<Self> {
+        Self::from_env("BTRBAK_TEST_BTRFS_RECV_DIR", test_name)
+    }
+
+    fn from_env(env_var: &str, test_name: &str) -> Option<Self> {
+        let base = match std::env::var(env_var) {
             Ok(v) if !v.is_empty() => PathBuf::from(v),
             _ => return None,
         };
@@ -36,13 +48,13 @@ impl Drop for BtrfsTestDir {
 }
 
 /// Depth-first traversal: delete all btrfs subvolumes under `dir`, then
-/// remove regular files/dirs.
+/// remove regular files/dirs.  Uses the `crate::btrfs` wrappers instead of
+/// shelling out directly.
 fn cleanup_recursive(dir: &Path) -> std::io::Result<()> {
     if !dir.exists() {
         return Ok(());
     }
 
-    // Collect entries first to avoid borrowing issues
     let entries: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .collect();
@@ -52,16 +64,11 @@ fn cleanup_recursive(dir: &Path) -> std::io::Result<()> {
             // Recurse first (depth-first)
             let _ = cleanup_recursive(&entry);
 
-            // Try to delete as subvolume; ignore errors (might be a plain dir)
-            let output = std::process::Command::new("btrfs")
-                .arg("subvolume")
-                .arg("delete")
-                .arg(&entry)
-                .output();
-            if let Ok(o) = output
-                && o.status.success()
+            // Try to delete as subvolume via the btrfs module
+            if crate::btrfs::is_subvolume(&entry).unwrap_or(false)
+                && crate::btrfs::delete_subvolume(&entry).is_ok()
             {
-                continue; // deleted as subvolume
+                continue;
             }
             // Fall back to plain directory removal
             let _ = std::fs::remove_dir_all(&entry);
@@ -72,13 +79,7 @@ fn cleanup_recursive(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Skip a test when the btrfs test directory is not configured.
-///
-/// Usage:
-/// ```ignore
-/// let td = require_btrfs_test_dir!("my_test_name");
-/// // td.path is a unique directory on a btrfs filesystem
-/// ```
+/// Skip a test when the **source** btrfs test directory is not configured.
 macro_rules! require_btrfs_test_dir {
     ($name:expr) => {
         match crate::test_util::BtrfsTestDir::new($name) {
@@ -91,6 +92,22 @@ macro_rules! require_btrfs_test_dir {
     };
 }
 pub(crate) use require_btrfs_test_dir;
+
+/// Skip a test when the **receive / target** btrfs test directory is not
+/// configured.  This must point to a *different* btrfs filesystem from
+/// `BTRBAK_TEST_BTRFS_DIR`.
+macro_rules! require_btrfs_recv_dir {
+    ($name:expr) => {
+        match crate::test_util::BtrfsTestDir::new_recv($name) {
+            Some(td) => td,
+            None => {
+                eprintln!("Skipped: BTRBAK_TEST_BTRFS_RECV_DIR not set");
+                return;
+            }
+        }
+    };
+}
+pub(crate) use require_btrfs_recv_dir;
 
 /// Build a `SourceConfig` suitable for tests.
 pub fn make_source_config(path: &Path, snapshot_dir: &Path) -> SourceConfig {

@@ -817,7 +817,10 @@ mod tests {
     // Integration tests (require BTRBAK_TEST_BTRFS_DIR)
     // ========================
 
-    use crate::test_util::{make_source_config, make_target_config, require_btrfs_test_dir, write_test_file};
+    use crate::test_util::{
+        make_source_config, make_target_config, require_btrfs_recv_dir,
+        require_btrfs_test_dir, write_test_file,
+    };
 
     // --- Local snapshot (manual) ---
 
@@ -953,6 +956,7 @@ mod tests {
     #[test]
     fn test_backup_send_snapshot() {
         let td = require_btrfs_test_dir!("send_snap");
+        let td_recv = require_btrfs_recv_dir!("send_snap");
 
         let src = td.path.join("src");
         btrfs::create_subvolume(&src).unwrap();
@@ -964,7 +968,7 @@ mod tests {
         let snap = snap_dir.join("btrbak_test");
         btrfs::create_snapshot(&src, &snap).unwrap();
 
-        let target_dir = td.path.join("target");
+        let target_dir = td_recv.path.join("target");
         fs::create_dir_all(&target_dir).unwrap();
 
         let source = make_source_config(&src, Path::new(".snapshots"));
@@ -1018,12 +1022,13 @@ mod tests {
     #[test]
     fn test_backup_single_source_full() {
         let td = require_btrfs_test_dir!("e2e_full");
+        let td_recv = require_btrfs_recv_dir!("e2e_full");
 
         let src = td.path.join("src");
         btrfs::create_subvolume(&src).unwrap();
         write_test_file(&src, "file.txt", "hello");
 
-        let target_dir = td.path.join("target");
+        let target_dir = td_recv.path.join("target");
         fs::create_dir_all(&target_dir).unwrap();
 
         let source = make_source_config(&src, Path::new(".snapshots"));
@@ -1042,12 +1047,13 @@ mod tests {
     #[test]
     fn test_backup_single_source_incremental() {
         let td = require_btrfs_test_dir!("e2e_incr");
+        let td_recv = require_btrfs_recv_dir!("e2e_incr");
 
         let src = td.path.join("src");
         btrfs::create_subvolume(&src).unwrap();
         write_test_file(&src, "v1.txt", "v1");
 
-        let target_dir = td.path.join("target");
+        let target_dir = td_recv.path.join("target");
         fs::create_dir_all(&target_dir).unwrap();
 
         let source = make_source_config(&src, Path::new(".snapshots"));

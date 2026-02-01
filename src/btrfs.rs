@@ -239,22 +239,24 @@ pub fn send_and_receive_piped(
         .take()
         .ok_or_else(|| BackupError::Btrfs("Failed to get stdin for receive process".to_string()))?;
 
+    let tp = ui::start_transfer();
     let start = std::time::Instant::now();
-    let progress = |total: u64| ui::transfer_progress(total, &start);
 
     // Try splice (zero-copy), fall back to userspace copy on EINVAL
-    let total_bytes = match splice_transfer(&send_stdout, &recv_stdin, progress) {
+    let total_bytes = match splice_transfer(&send_stdout, &recv_stdin, |total| {
+        tp.update(total, &start);
+    }) {
         Ok(total) => total,
         Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
             copy_transfer(&mut send_stdout, &mut recv_stdin, |total| {
-                ui::transfer_progress(total, &start);
+                tp.update(total, &start);
             })?
         }
         Err(e) => return Err(BackupError::Io(e)),
     };
 
     let elapsed = start.elapsed().as_secs_f64();
-    ui::transfer_done(total_bytes, elapsed);
+    tp.finish(total_bytes, elapsed);
 
     // Explicitly close stdin so receive process sees EOF
     drop(recv_stdin);

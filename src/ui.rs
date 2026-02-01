@@ -1,8 +1,8 @@
-use console::{Style, Term};
-use std::io::Write as _;
+use console::Style;
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use std::io::IsTerminal;
 use std::process::Command;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -14,9 +14,8 @@ enum Verbosity {
 
 struct UiState {
     verbosity: Verbosity,
-    term: Term,
     is_tty: bool,
-    last_progress_nanos: AtomicU64,
+    mp: MultiProgress,
 }
 
 static UI: OnceLock<UiState> = OnceLock::new();
@@ -30,28 +29,36 @@ pub fn init(verbose: bool, quiet: bool) {
         Verbosity::Normal
     };
 
-    let term = Term::stderr();
-    let is_tty = term.is_term();
+    let is_tty = std::io::stderr().is_terminal();
+
+    // All output goes to stderr; set color support based on stderr TTY detection
+    console::set_colors_enabled(is_tty);
 
     let _ = UI.set(UiState {
         verbosity,
-        term,
         is_tty,
-        last_progress_nanos: AtomicU64::new(0),
+        mp: MultiProgress::new(),
     });
 }
 
 fn state() -> &'static UiState {
     UI.get_or_init(|| {
-        let term = Term::stderr();
-        let is_tty = term.is_term();
+        let is_tty = std::io::stderr().is_terminal();
+        console::set_colors_enabled(is_tty);
         UiState {
             verbosity: Verbosity::Normal,
-            term,
             is_tty,
-            last_progress_nanos: AtomicU64::new(0),
+            mp: MultiProgress::new(),
         }
     })
+}
+
+/// Print a line to stderr, coordinated with any active progress bars.
+/// Uses `MultiProgress::println` which clears active progress bars before
+/// printing, then redraws them — preventing garbled output.
+fn println_stderr(msg: impl AsRef<str>) {
+    let s = state();
+    let _ = s.mp.println(msg);
 }
 
 /// `\n== {msg} ==\n` (bold cyan)
@@ -61,7 +68,10 @@ pub fn header(msg: &str) {
         return;
     }
     let style = Style::new().bold().cyan();
-    let _ = s.term.write_line(&format!("\n{}\n", style.apply_to(format!("== {} ==", msg))));
+    println_stderr(format!(
+        "\n{}\n",
+        style.apply_to(format!("== {} ==", msg))
+    ));
 }
 
 /// `[{cur}/{total}] {msg}` (bold)
@@ -71,7 +81,7 @@ pub fn step(cur: usize, total: usize, msg: &str) {
         return;
     }
     let style = Style::new().bold();
-    let _ = s.term.write_line(&format!(
+    println_stderr(format!(
         "{}",
         style.apply_to(format!("[{}/{}] {}", cur, total, msg))
     ));
@@ -84,7 +94,7 @@ pub fn substep(msg: &str) {
         return;
     }
     let style = Style::new().dim();
-    let _ = s.term.write_line(&format!("  {} {}", style.apply_to("->"), msg));
+    println_stderr(format!("  {} {}", style.apply_to("->"), msg));
 }
 
 /// `  ✓ {msg}` (green)
@@ -94,7 +104,10 @@ pub fn success(msg: &str) {
         return;
     }
     let style = Style::new().green();
-    let _ = s.term.write_line(&format!("  {}", style.apply_to(format!("\u{2713} {}", msg))));
+    println_stderr(format!(
+        "  {}",
+        style.apply_to(format!("\u{2713} {}", msg))
+    ));
 }
 
 /// `  {msg}`
@@ -103,7 +116,7 @@ pub fn info(msg: &str) {
     if s.verbosity == Verbosity::Quiet {
         return;
     }
-    let _ = s.term.write_line(&format!("  {}", msg));
+    println_stderr(format!("  {}", msg));
 }
 
 /// `     {msg}` (dim) - only in verbose mode
@@ -113,33 +126,39 @@ pub fn detail(msg: &str) {
         return;
     }
     let style = Style::new().dim();
-    let _ = s.term.write_line(&format!("     {}", style.apply_to(msg)));
+    println_stderr(format!("     {}", style.apply_to(msg)));
 }
 
 /// `  ⚠ {msg}` (yellow) - always shown
 pub fn warning(msg: &str) {
-    let s = state();
     let style = Style::new().yellow();
-    let _ = s.term.write_line(&format!("  {}", style.apply_to(format!("\u{26a0} {}", msg))));
+    println_stderr(format!(
+        "  {}",
+        style.apply_to(format!("\u{26a0} {}", msg))
+    ));
 }
 
 /// `  ✗ {msg}` (red) - always shown
 pub fn error(msg: &str) {
-    let s = state();
     let style = Style::new().red();
-    let _ = s.term.write_line(&format!("  {}", style.apply_to(format!("\u{2717} {}", msg))));
+    println_stderr(format!(
+        "  {}",
+        style.apply_to(format!("\u{2717} {}", msg))
+    ));
 }
 
 /// Error with indented hint lines - always shown
 pub fn error_with_hints(msg: &str, hints: &[&str]) {
     error(msg);
     if !hints.is_empty() {
-        let s = state();
-        let _ = s.term.write_line("");
+        println_stderr("");
         let style = Style::new().dim();
-        let _ = s.term.write_line(&format!("  {}", style.apply_to("Hints:")));
+        println_stderr(format!("  {}", style.apply_to("Hints:")));
         for hint in hints {
-            let _ = s.term.write_line(&format!("    {}", style.apply_to(format!("\u{2022} {}", hint))));
+            println_stderr(format!(
+                "    {}",
+                style.apply_to(format!("\u{2022} {}", hint))
+            ));
         }
     }
 }
@@ -151,7 +170,10 @@ pub fn cmd_start(cmd_str: &str) {
         return;
     }
     let style = Style::new().dim().cyan();
-    let _ = s.term.write_line(&format!("  {}", style.apply_to(format!("$ {}", cmd_str))));
+    println_stderr(format!(
+        "  {}",
+        style.apply_to(format!("$ {}", cmd_str))
+    ));
 }
 
 /// `    stderr: {line}` (yellow) for each line
@@ -164,7 +186,10 @@ pub fn cmd_stderr_output(text: &str) {
     for line in text.lines() {
         let trimmed = line.trim();
         if !trimmed.is_empty() {
-            let _ = s.term.write_line(&format!("    {}", style.apply_to(format!("stderr: {}", trimmed))));
+            println_stderr(format!(
+                "    {}",
+                style.apply_to(format!("stderr: {}", trimmed))
+            ));
         }
     }
 }
@@ -175,7 +200,7 @@ pub fn section_end() {
     if s.verbosity == Verbosity::Quiet {
         return;
     }
-    let _ = s.term.write_line("");
+    println_stderr("");
 }
 
 /// Format byte count into human-readable string (e.g. "12.34 MiB")
@@ -196,69 +221,82 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Self-throttling in-place progress update.
-/// Internally enforces 500ms minimum between updates.
-/// Skips entirely on non-TTY to avoid ANSI garbage in log files.
-pub fn transfer_progress(transferred: u64, start: &Instant) {
-    let s = state();
-    if s.verbosity == Verbosity::Quiet || !s.is_tty {
-        return;
-    }
-
-    let elapsed = start.elapsed();
-    let now_nanos = elapsed.as_nanos() as u64;
-    let last = s.last_progress_nanos.load(Ordering::Relaxed);
-
-    // Throttle: skip if less than 500ms since last update
-    if now_nanos.saturating_sub(last) < 500_000_000 {
-        return;
-    }
-    s.last_progress_nanos.store(now_nanos, Ordering::Relaxed);
-
-    let elapsed_secs = elapsed.as_secs_f64();
-    let speed = if elapsed_secs > 0.0 {
-        (transferred as f64 / elapsed_secs) as u64
-    } else {
-        0
-    };
-
-    let content = format!(
-        "    {} | {}/s",
-        format_bytes(transferred),
-        format_bytes(speed),
-    );
-    let style = Style::new().dim().cyan();
-    // Single write: clear line + content in one call, no separate flush
-    let line = format!("\x1b[2K\r{}", style.apply_to(&content));
-    let _ = write!(&s.term, "{}", line);
-    let _ = s.term.flush();
+/// Handle for an active transfer progress display.
+///
+/// Uses `indicatif::ProgressBar` managed by `MultiProgress`, so all output
+/// (progress + text messages) is properly coordinated without garbled lines.
+///
+/// On TTY: animated spinner with live transfer stats.
+/// On non-TTY: progress hidden; final summary printed on `finish()`.
+///
+/// Implements `Drop` to ensure the progress bar is cleared on error paths.
+pub struct TransferProgress {
+    bar: ProgressBar,
 }
 
-/// Finalize the progress line with final stats, replacing the live line.
-/// TTY-aware: uses ANSI escape on TTY, plain line on non-TTY.
-pub fn transfer_done(transferred: u64, elapsed_secs: f64) {
+/// Create a new transfer progress display.
+pub fn start_transfer() -> TransferProgress {
     let s = state();
-    if s.verbosity == Verbosity::Quiet {
-        return;
-    }
-    let avg_speed = if elapsed_secs > 0.0 {
-        (transferred as f64 / elapsed_secs) as u64
+    let bar = if s.is_tty && s.verbosity != Verbosity::Quiet {
+        let bar = s.mp.add(ProgressBar::new_spinner());
+        bar.set_style(
+            ProgressStyle::with_template("    {spinner:.cyan.dim} {msg:.cyan.dim}")
+                .unwrap(),
+        );
+        bar.enable_steady_tick(std::time::Duration::from_millis(100));
+        bar
     } else {
-        0
+        ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden())
     };
-    let content = format!(
-        "    {} transferred in {:.1}s ({}/s)",
-        format_bytes(transferred),
-        elapsed_secs,
-        format_bytes(avg_speed),
-    );
+    TransferProgress { bar }
+}
 
-    if s.is_tty {
+impl TransferProgress {
+    /// Update the progress display with current transfer stats.
+    pub fn update(&self, transferred: u64, start: &Instant) {
+        let elapsed = start.elapsed().as_secs_f64();
+        let speed = if elapsed > 0.0 {
+            (transferred as f64 / elapsed) as u64
+        } else {
+            0
+        };
+        self.bar.set_message(format!(
+            "{} | {}/s",
+            format_bytes(transferred),
+            format_bytes(speed),
+        ));
+    }
+
+    /// Finalize the progress display with summary stats.
+    pub fn finish(self, transferred: u64, elapsed_secs: f64) {
+        self.bar.finish_and_clear();
+
+        let s = state();
+        if s.verbosity == Verbosity::Quiet {
+            return;
+        }
+
+        let avg_speed = if elapsed_secs > 0.0 {
+            (transferred as f64 / elapsed_secs) as u64
+        } else {
+            0
+        };
+        let content = format!(
+            "    {} transferred in {:.1}s ({}/s)",
+            format_bytes(transferred),
+            elapsed_secs,
+            format_bytes(avg_speed),
+        );
         let style = Style::new().dim().cyan();
-        let line = format!("\x1b[2K\r{}", style.apply_to(&content));
-        let _ = s.term.write_line(&line);
-    } else {
-        let _ = s.term.write_line(&content);
+        println_stderr(format!("{}", style.apply_to(&content)));
+    }
+}
+
+impl Drop for TransferProgress {
+    fn drop(&mut self) {
+        // Ensure the progress bar is cleared if dropped without calling finish()
+        // (e.g. on error paths). No-op if already finished.
+        self.bar.finish_and_clear();
     }
 }
 

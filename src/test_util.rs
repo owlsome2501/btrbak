@@ -1,8 +1,35 @@
 use crate::config::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Probe whether we can perform btrfs subvolume operations on `base`.
+/// Tries to create and delete a temporary subvolume; returns `false` if
+/// the process lacks the required privileges (typically `CAP_SYS_ADMIN`).
+fn can_manage_btrfs(base: &Path) -> bool {
+    let probe = base.join(".btrbak_probe");
+    if crate::btrfs::create_subvolume(&probe).is_err() {
+        return false;
+    }
+    let _ = crate::btrfs::delete_subvolume(&probe);
+    true
+}
+
+/// Cached privilege check for the source and receive filesystems.
+/// The probe runs at most once per env var for the entire test run.
+fn can_manage_btrfs_cached(env_var: &str, base: &Path) -> bool {
+    static CACHE_SRC: OnceLock<bool> = OnceLock::new();
+    static CACHE_RECV: OnceLock<bool> = OnceLock::new();
+
+    let cache = if env_var == "BTRBAK_TEST_BTRFS_DIR" {
+        &CACHE_SRC
+    } else {
+        &CACHE_RECV
+    };
+    *cache.get_or_init(|| can_manage_btrfs(base))
+}
 
 /// RAII guard that creates a unique subdirectory under a btrfs test filesystem
 /// and recursively cleans up all btrfs subvolumes + files on drop.
@@ -12,7 +39,8 @@ pub struct BtrfsTestDir {
 
 impl BtrfsTestDir {
     /// Create a test directory on the **source** filesystem (`BTRBAK_TEST_BTRFS_DIR`).
-    /// Returns `None` if the env var is not set (caller should skip).
+    /// Returns `None` if the env var is not set or privileges are insufficient
+    /// (caller should skip).
     pub fn new(test_name: &str) -> Option<Self> {
         Self::from_env("BTRBAK_TEST_BTRFS_DIR", test_name)
     }
@@ -30,6 +58,14 @@ impl BtrfsTestDir {
             Ok(v) if !v.is_empty() => PathBuf::from(v),
             _ => return None,
         };
+
+        if !can_manage_btrfs_cached(env_var, &base) {
+            eprintln!(
+                "Skipped: insufficient privileges for btrfs operations on {}",
+                base.display()
+            );
+            return None;
+        }
 
         let pid = std::process::id();
         let seq = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -79,13 +115,16 @@ fn cleanup_recursive(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Skip a test when the **source** btrfs test directory is not configured.
+/// Skip a test when the **source** btrfs test directory is not available
+/// (env var unset or insufficient privileges).
 macro_rules! require_btrfs_test_dir {
     ($name:expr) => {
         match crate::test_util::BtrfsTestDir::new($name) {
             Some(td) => td,
             None => {
-                eprintln!("Skipped: BTRBAK_TEST_BTRFS_DIR not set");
+                eprintln!(
+                    "Skipped: BTRBAK_TEST_BTRFS_DIR not set or insufficient privileges"
+                );
                 return;
             }
         }
@@ -94,14 +133,17 @@ macro_rules! require_btrfs_test_dir {
 pub(crate) use require_btrfs_test_dir;
 
 /// Skip a test when the **receive / target** btrfs test directory is not
-/// configured.  This must point to a *different* btrfs filesystem from
+/// available (env var unset or insufficient privileges).
+/// This must point to a *different* btrfs filesystem from
 /// `BTRBAK_TEST_BTRFS_DIR`.
 macro_rules! require_btrfs_recv_dir {
     ($name:expr) => {
         match crate::test_util::BtrfsTestDir::new_recv($name) {
             Some(td) => td,
             None => {
-                eprintln!("Skipped: BTRBAK_TEST_BTRFS_RECV_DIR not set");
+                eprintln!(
+                    "Skipped: BTRBAK_TEST_BTRFS_RECV_DIR not set or insufficient privileges"
+                );
                 return;
             }
         }

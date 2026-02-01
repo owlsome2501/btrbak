@@ -886,20 +886,35 @@ mod tests {
 
         let source = make_source_config(&src, Path::new("snaps"));
 
-        // Three rounds — the third should clean up the old _prev
+        // Round 1: creates btrbak_test
         let (_s1, _) =
             create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+
+        // Round 2: renames round-1 snapshot to btrbak_test_prev, creates new btrbak_test
         let (_s2, prev2) =
             create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
         let prev2_path = prev2.unwrap();
+        // prev2_path holds the round-1 snapshot; capture its subvolume ID
+        let prev2_id = btrfs::get_subvolume_id(&prev2_path).unwrap();
 
+        // Round 3: deletes old _prev (round-1), renames round-2 to _prev, creates new
         let (_s3, prev3) =
             create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
 
-        // The old _prev (prev2_path) should have been deleted by the third call
-        assert!(!prev2_path.exists());
-        // Current _prev should exist
-        assert!(btrfs::is_subvolume(prev3.as_ref().unwrap()).unwrap());
+        // The path btrbak_test_prev still exists, but it now holds a DIFFERENT
+        // subvolume (the round-2 snapshot), confirming the old _prev was deleted.
+        let prev3_path = prev3.as_ref().unwrap();
+        assert!(btrfs::is_subvolume(prev3_path).unwrap());
+        let prev3_id = btrfs::get_subvolume_id(prev3_path).unwrap();
+        assert_ne!(prev2_id, prev3_id, "old _prev should have been replaced");
+
+        // Only 2 subvolumes should remain: btrbak_test and btrbak_test_prev
+        let subvol_count = fs::read_dir(&snap_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| btrfs::is_subvolume(&e.path()).unwrap_or(false))
+            .count();
+        assert_eq!(subvol_count, 2);
     }
 
     #[test]

@@ -174,3 +174,118 @@ pub fn write_test_file(dir: &Path, name: &str, content: &str) {
     let p = dir.join(name);
     std::fs::write(&p, content).expect("failed to write test file");
 }
+
+// ── LUKS / encryption test helpers ──────────────────────────────────────
+
+/// Check whether `cryptsetup --version` succeeds.  Cached for the process.
+pub fn can_run_cryptsetup() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::process::Command::new("cryptsetup")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
+/// RAII wrapper around a LUKS-backed loop device used by integration tests.
+///
+/// On `Drop` the helper attempts to close the dm-crypt mapping (best-effort).
+pub struct LuksTestDevice {
+    pub loop_device: String,
+    pub keyfile: PathBuf,
+    pub mapping_name: String,
+}
+
+impl LuksTestDevice {
+    /// Build a `LuksTestDevice` from environment variables set by the
+    /// integration test script.  Returns `None` (→ skip) when the env vars
+    /// are unset or `cryptsetup` is unavailable.
+    pub fn new(test_name: &str) -> Option<Self> {
+        let loop_device = match std::env::var("BTRBAK_TEST_LUKS_LOOP") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return None,
+        };
+        let keyfile = match std::env::var("BTRBAK_TEST_LUKS_KEYFILE") {
+            Ok(v) if !v.is_empty() => PathBuf::from(v),
+            _ => return None,
+        };
+
+        if !can_run_cryptsetup() {
+            eprintln!("Skipped: cryptsetup not available");
+            return None;
+        }
+
+        let pid = std::process::id();
+        let seq = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mapping_name = format!("btrbak_test_{}_{}_{}", test_name, pid, seq);
+
+        Some(Self {
+            loop_device,
+            keyfile,
+            mapping_name,
+        })
+    }
+
+    /// Path to the opened dm-crypt device (e.g. `/dev/mapper/btrbak_test_…`).
+    pub fn mapped_device_path(&self) -> String {
+        format!("/dev/mapper/{}", self.mapping_name)
+    }
+
+    /// Build an `EncryptionConfig` that uses the keyfile.
+    pub fn encryption_config(&self) -> crate::config::EncryptionConfig {
+        crate::config::EncryptionConfig {
+            keyfile: Some(self.keyfile.clone()),
+            passphrase_env: None,
+            mapping_name: self.mapping_name.clone(),
+        }
+    }
+
+    /// Build an `EncryptionConfig` that uses the passphrase env var.
+    pub fn encryption_config_passphrase(&self) -> crate::config::EncryptionConfig {
+        crate::config::EncryptionConfig {
+            keyfile: None,
+            passphrase_env: Some("BTRBAK_TEST_LUKS_PASSPHRASE".to_string()),
+            mapping_name: self.mapping_name.clone(),
+        }
+    }
+}
+
+impl Drop for LuksTestDevice {
+    fn drop(&mut self) {
+        // Best-effort cleanup: close the LUKS mapping if it was opened.
+        let _ = crate::device::close_luks_device(&self.mapping_name);
+    }
+}
+
+/// Skip a test when the LUKS test device is not available.
+macro_rules! require_luks_test_device {
+    ($name:expr) => {
+        match crate::test_util::LuksTestDevice::new($name) {
+            Some(dev) => dev,
+            None => {
+                eprintln!("Skipped: LUKS test device not available");
+                return;
+            }
+        }
+    };
+}
+pub(crate) use require_luks_test_device;
+
+/// Build a `TargetConfig` for an encrypted device.
+#[allow(dead_code)]
+pub fn make_encrypted_target_config(
+    device: &str,
+    encryption: crate::config::EncryptionConfig,
+) -> crate::config::TargetConfig {
+    crate::config::TargetConfig {
+        location: crate::config::TargetLocation::Device(device.to_string()),
+        enable_live_boot: false,
+        snapshot_subvolume: None,
+        live_boot_subvolume: None,
+        encryption: Some(encryption),
+    }
+}

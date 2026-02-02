@@ -242,8 +242,17 @@ impl MountGuard {
             encryption.passphrase_env.as_deref(),
         )?;
 
-        // Mount the mapped device
-        mount_device(&mapped_device, &mount_point)?;
+        // Mount the mapped device; if this fails, close the LUKS mapping
+        // before propagating the error.
+        if let Err(e) = mount_device(&mapped_device, &mount_point) {
+            if let Err(close_err) = close_luks_device(&encryption.mapping_name) {
+                ui::warning(&format!(
+                    "Failed to close LUKS mapping {} after mount failure: {}",
+                    encryption.mapping_name, close_err
+                ));
+            }
+            return Err(e);
+        }
 
         Ok(Self {
             mount_point,
@@ -290,5 +299,158 @@ impl Drop for MountGuard {
                 mapping_name, e
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // ── No-privilege tests (always run) ─────────────────────────────────
+
+    #[test]
+    fn test_mount_guard_for_mounted_path() {
+        let path = Path::new("/tmp");
+        let guard = MountGuard::for_mounted_path(path);
+        assert_eq!(guard.mount_point(), path);
+        // Drop is a no-op – should not panic.
+        drop(guard);
+    }
+
+    #[test]
+    fn test_mount_guard_mount_point_accessor() {
+        let path = Path::new("/some/path");
+        let guard = MountGuard::for_mounted_path(path);
+        assert_eq!(guard.mount_point(), Path::new("/some/path"));
+    }
+
+    #[test]
+    fn test_is_mounted_true() {
+        // The root filesystem is always mounted.
+        assert!(is_mounted(Path::new("/")).unwrap());
+    }
+
+    #[test]
+    fn test_is_mounted_false() {
+        assert!(!is_mounted(Path::new("/nonexistent_mount_point_btrbak_test")).unwrap());
+    }
+
+    #[test]
+    fn test_find_mount_point_none() {
+        // /dev/null is never a mounted filesystem source.
+        let result = find_mount_point("/dev/null").unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── LUKS tests (require integration env) ────────────────────────────
+
+    use crate::test_util::require_luks_test_device;
+
+    #[test]
+    fn test_is_luks_device_positive() {
+        let dev = require_luks_test_device!("is_luks_pos");
+        assert!(is_luks_device(&dev.loop_device).unwrap());
+    }
+
+    #[test]
+    fn test_is_luks_device_negative() {
+        let _dev = require_luks_test_device!("is_luks_neg");
+        assert!(!is_luks_device("/dev/null").unwrap());
+    }
+
+    #[test]
+    fn test_open_close_luks_keyfile() {
+        let dev = require_luks_test_device!("open_close_kf");
+        let enc = dev.encryption_config();
+
+        let mapped = open_luks_device(
+            &dev.loop_device,
+            &enc.mapping_name,
+            enc.keyfile.as_deref(),
+            enc.passphrase_env.as_deref(),
+        )
+        .expect("open_luks_device with keyfile should succeed");
+
+        assert_eq!(mapped, dev.mapped_device_path());
+        assert!(Path::new(&mapped).exists());
+
+        close_luks_device(&enc.mapping_name).expect("close should succeed");
+        assert!(!Path::new(&mapped).exists());
+    }
+
+    #[test]
+    fn test_open_luks_passphrase_env() {
+        let dev = require_luks_test_device!("open_pass_env");
+
+        // The integration script exports BTRBAK_TEST_LUKS_PASSPHRASE.
+        if std::env::var("BTRBAK_TEST_LUKS_PASSPHRASE").is_err() {
+            eprintln!("Skipped: BTRBAK_TEST_LUKS_PASSPHRASE not set");
+            return;
+        }
+
+        let enc = dev.encryption_config_passphrase();
+        let mapped = open_luks_device(
+            &dev.loop_device,
+            &enc.mapping_name,
+            enc.keyfile.as_deref(),
+            enc.passphrase_env.as_deref(),
+        )
+        .expect("open_luks_device with passphrase env should succeed");
+
+        assert_eq!(mapped, dev.mapped_device_path());
+        close_luks_device(&enc.mapping_name).expect("close should succeed");
+    }
+
+    #[test]
+    fn test_open_luks_no_credentials() {
+        let dev = require_luks_test_device!("no_creds");
+        let result = open_luks_device(&dev.loop_device, &dev.mapping_name, None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_open_luks_wrong_keyfile() {
+        let dev = require_luks_test_device!("wrong_kf");
+        // Use /dev/null as a wrong keyfile (empty).
+        let result = open_luks_device(
+            &dev.loop_device,
+            &dev.mapping_name,
+            Some(Path::new("/dev/null")),
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_close_luks_not_open() {
+        let _dev = require_luks_test_device!("close_not_open");
+        let result = close_luks_device("btrbak_test_nonexistent_mapping");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mount_guard_encrypted_lifecycle() {
+        let dev = require_luks_test_device!("enc_lifecycle");
+        let enc = dev.encryption_config();
+
+        let guard = MountGuard::new_encrypted(&dev.loop_device, &enc)
+            .expect("new_encrypted should succeed");
+
+        let mp = guard.mount_point().to_path_buf();
+        assert!(mp.exists());
+
+        drop(guard);
+        // After drop, the temp dir is removed and the mapping closed.
+        assert!(!mp.exists());
+        assert!(!Path::new(&dev.mapped_device_path()).exists());
+    }
+
+    #[test]
+    fn test_mount_guard_encrypted_not_luks() {
+        let _dev = require_luks_test_device!("enc_not_luks");
+        let enc = _dev.encryption_config();
+        let result = MountGuard::new_encrypted("/dev/null", &enc);
+        assert!(result.is_err());
     }
 }

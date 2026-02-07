@@ -28,6 +28,10 @@ pub enum Commands {
         /// Dry run: show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
+
+        /// Use privileged system tools (`cryptsetup`, `mount`, `umount`) instead of user-space tools
+        #[arg(long)]
+        privileged_mode: bool,
     },
 
     /// Prepare live boot environment (initialize subvolumes and bootloader)
@@ -35,6 +39,10 @@ pub enum Commands {
         /// Path to configuration file (TOML)
         #[arg(short, long, default_value = "btrbak.toml")]
         config: PathBuf,
+
+        /// Use privileged system tools (`cryptsetup`, `mount`, `umount`) instead of user-space tools
+        #[arg(long)]
+        privileged_mode: bool,
     },
 
     /// Validate configuration file
@@ -43,4 +51,49 @@ pub enum Commands {
         #[arg(short, long, default_value = "btrbak.toml")]
         config: PathBuf,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_backup_privileged_mode_default_false() {
+        let cli = Cli::parse_from(["btrbak", "backup"]);
+        match cli.command {
+            Commands::Backup {
+                privileged_mode, ..
+            } => {
+                assert!(!privileged_mode);
+            }
+            _ => panic!("expected backup command"),
+        }
+    }
+
+    #[test]
+    fn test_backup_privileged_mode_true_when_set() {
+        let cli = Cli::parse_from(["btrbak", "backup", "--privileged-mode"]);
+        match cli.command {
+            Commands::Backup {
+                privileged_mode, ..
+            } => {
+                assert!(privileged_mode);
+            }
+            _ => panic!("expected backup command"),
+        }
+    }
+
+    #[test]
+    fn test_prepare_live_privileged_mode_true_when_set() {
+        let cli = Cli::parse_from(["btrbak", "prepare-live", "--privileged-mode"]);
+        match cli.command {
+            Commands::PrepareLive {
+                privileged_mode, ..
+            } => {
+                assert!(privileged_mode);
+            }
+            _ => panic!("expected prepare-live command"),
+        }
+    }
 }

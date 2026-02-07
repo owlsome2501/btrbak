@@ -260,7 +260,7 @@ make clippy            # cargo clippy -- -D warnings
 make fmt               # cargo fmt
 make fmt-check         # cargo fmt -- --check
 make test              # unit tests (no root required)
-make test-integration  # integration tests (requires sudo & btrfs-progs)
+make test-integration  # integration tests (prefers udisksctl, fallback sudo)
 make clean             # cargo clean
 make install           # cargo install --path .
 ```
@@ -288,12 +288,13 @@ make test-integration
 The script `scripts/test-integration.sh` handles all setup and teardown automatically:
 
 1. Creates two sparse img files (default 512 MB each, configurable via `IMG_SIZE`)
-2. Formats them as btrfs and loop-mounts them via `sudo`
+2. Preferentially uses `udisksctl` + UDisks2 D-Bus `Block.Format` to create loop devices, format btrfs, and mount
 3. Runs `cargo test` with `BTRBAK_TEST_BTRFS_DIR` and `BTRBAK_TEST_BTRFS_RECV_DIR` set
 4. Unmounts and removes the img files on exit
 
-Root privileges (`sudo`) are only used for filesystem setup and teardown.
-If `sudo` is unavailable the script exits cleanly and integration tests are skipped.
+If `udisksctl` is unavailable, the script falls back to `sudo` for setup/teardown.
+If both user-space tooling and `sudo` are unavailable, integration tests are skipped cleanly.
+When `cryptsetup` is available, the script also prepares a LUKS test device in user space.
 Tests that require btrfs privileges also detect this at runtime and skip automatically,
 so a plain `cargo test` always succeeds regardless of the environment.
 

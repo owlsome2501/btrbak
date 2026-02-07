@@ -230,11 +230,6 @@ impl LuksTestDevice {
         })
     }
 
-    /// Path to the opened dm-crypt device (e.g. `/dev/mapper/btrbak_test_…`).
-    pub fn mapped_device_path(&self) -> String {
-        format!("/dev/mapper/{}", self.mapping_name)
-    }
-
     /// Build an `EncryptionConfig` that uses the keyfile.
     pub fn encryption_config(&self) -> crate::config::EncryptionConfig {
         crate::config::EncryptionConfig {

@@ -52,9 +52,14 @@ fn compute_backup_steps(config: &Config) -> usize {
 }
 
 /// Main backup procedure
-pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> {
+pub fn run_backup(
+    config_path: &Path,
+    dry_run: bool,
+    privileged_mode: bool,
+) -> Result<(), BackupError> {
     let config = Config::from_file(config_path)?;
     config.validate()?;
+    let device_mode = device::DeviceAccessMode::from_privileged_flag(privileged_mode);
 
     // Acquire lock to prevent concurrent runs with same config name
     let _lock = ConfigLock::acquire(&config.name)?;
@@ -78,7 +83,7 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
     // Step 1: Ensure target is mounted
     current_step += 1;
     ui::step(current_step, total_steps, "Mounting target");
-    let mount_guard = mount_target(&config)?;
+    let mount_guard = mount_target(&config, device_mode)?;
     let target_mount = mount_guard.mount_point();
     ui::success("Target mounted");
 
@@ -233,7 +238,10 @@ fn backup_single_source(
 
 /// Mount target device if needed
 /// Returns a MountGuard that will unmount the device when dropped
-fn mount_target(config: &Config) -> Result<device::MountGuard, BackupError> {
+fn mount_target(
+    config: &Config,
+    mode: device::DeviceAccessMode,
+) -> Result<device::MountGuard, BackupError> {
     match &config.target.location {
         TargetLocation::MountedPath(path) => {
             // Already mounted, just verify it's accessible
@@ -248,9 +256,9 @@ fn mount_target(config: &Config) -> Result<device::MountGuard, BackupError> {
         TargetLocation::Device(device) => {
             // Check if encryption is configured
             if let Some(encryption) = &config.target.encryption {
-                device::MountGuard::new_encrypted(device, encryption)
+                device::MountGuard::new_encrypted_with_mode(device, encryption, mode)
             } else {
-                device::MountGuard::new(device)
+                device::MountGuard::new_with_mode(device, mode)
             }
         }
     }
@@ -707,9 +715,13 @@ fn cleanup_old_snapper_snapshots(
 }
 
 /// Prepare live boot environment (initial setup)
-pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
+pub fn prepare_live_environment(
+    config_path: &Path,
+    privileged_mode: bool,
+) -> Result<(), BackupError> {
     let config = Config::from_file(config_path)?;
     config.validate()?;
+    let device_mode = device::DeviceAccessMode::from_privileged_flag(privileged_mode);
 
     if !config.target.enable_live_boot {
         return Err(BackupError::Config(anyhow::anyhow!(
@@ -726,7 +738,7 @@ pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
 
     // Mount target if needed
     ui::step(1, 2, "Mounting target");
-    let mount_guard = mount_target(&config)?;
+    let mount_guard = mount_target(&config, device_mode)?;
     ui::success("Target mounted");
 
     // Prepare live boot environment

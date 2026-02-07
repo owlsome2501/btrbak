@@ -177,20 +177,6 @@ pub fn write_test_file(dir: &Path, name: &str, content: &str) {
 
 // ── LUKS / encryption test helpers ──────────────────────────────────────
 
-/// Check whether `cryptsetup --version` succeeds.  Cached for the process.
-pub fn can_run_cryptsetup() -> bool {
-    static CACHE: OnceLock<bool> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        std::process::Command::new("cryptsetup")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
-}
-
 /// RAII wrapper around a LUKS-backed loop device used by integration tests.
 ///
 /// On `Drop` the helper attempts to close the dm-crypt mapping (best-effort).
@@ -213,11 +199,6 @@ impl LuksTestDevice {
             Ok(v) if !v.is_empty() => PathBuf::from(v),
             _ => return None,
         };
-
-        if !can_run_cryptsetup() {
-            eprintln!("Skipped: cryptsetup not available");
-            return None;
-        }
 
         let pid = std::process::id();
         let seq = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -269,18 +250,3 @@ macro_rules! require_luks_test_device {
     };
 }
 pub(crate) use require_luks_test_device;
-
-/// Build a `TargetConfig` for an encrypted device.
-#[allow(dead_code)]
-pub fn make_encrypted_target_config(
-    device: &str,
-    encryption: crate::config::EncryptionConfig,
-) -> crate::config::TargetConfig {
-    crate::config::TargetConfig {
-        location: crate::config::TargetLocation::Device(device.to_string()),
-        enable_live_boot: false,
-        snapshot_subvolume: None,
-        live_boot_subvolume: None,
-        encryption: Some(encryption),
-    }
-}

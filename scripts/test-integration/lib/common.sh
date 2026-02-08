@@ -142,14 +142,53 @@ setup_luks_if_available() {
     echo "    LUKS loop device: $LUKS_LOOP"
 }
 
+strict_mode_enabled() {
+    case "${BTRBAK_STRICT_INTEGRATION:-0}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+probe_btrfs_subvolume_ops() {
+    local base="$1"
+    local probe="$base/.btrbak_probe_$$"
+    if btrfs subvolume create "$probe" >/dev/null 2>&1; then
+        btrfs subvolume delete "$probe" >/dev/null 2>&1 || true
+        return 0
+    fi
+    return 1
+}
+
+verify_btrfs_capability_or_fail() {
+    if ! strict_mode_enabled; then
+        return 0
+    fi
+
+    if ! probe_btrfs_subvolume_ops "$MNT_SRC"; then
+        echo "ERROR: strict mode enabled but cannot create btrfs subvolume on source mount: $MNT_SRC" >&2
+        echo "       This would cause false-positive 'ok' tests via skip paths; fix permissions or run in a privileged environment." >&2
+        exit 1
+    fi
+
+    if ! probe_btrfs_subvolume_ops "$MNT_RECV"; then
+        echo "ERROR: strict mode enabled but cannot create btrfs subvolume on receive mount: $MNT_RECV" >&2
+        echo "       This would cause false-positive 'ok' tests via skip paths; fix permissions or run in a privileged environment." >&2
+        exit 1
+    fi
+}
+
 run_tests() {
     export BTRBAK_TEST_BTRFS_DIR="$MNT_SRC"
     export BTRBAK_TEST_BTRFS_RECV_DIR="$MNT_RECV"
     export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
+    export BTRBAK_STRICT_INTEGRATION="${BTRBAK_STRICT_INTEGRATION:-1}"
 
     echo "==> Source mount:   $MNT_SRC"
     echo "==> Receive mount:  $MNT_RECV"
     echo "==> Test threads:   $RUST_TEST_THREADS"
+    echo "==> Strict checks:  $BTRBAK_STRICT_INTEGRATION"
+
+    verify_btrfs_capability_or_fail
 
     echo "==> Running tests..."
     cd "$PROJECT_DIR"

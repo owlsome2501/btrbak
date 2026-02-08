@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod btrfs;
 pub mod cli;
+pub(crate) mod command_runner;
 pub mod config;
 pub mod device;
 pub mod error;

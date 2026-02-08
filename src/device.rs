@@ -1,3 +1,4 @@
+use crate::command_runner;
 use crate::error::BackupError;
 use crate::ui;
 use std::collections::HashMap;
@@ -273,7 +274,7 @@ impl DevicePathResolver {
             cmd.arg(device);
             ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
-            let output = cmd.output()?;
+            let output = command_runner::output(&mut cmd)?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 ui::cmd_stderr_output(&stderr);
@@ -302,7 +303,7 @@ impl DevicePathResolver {
         cmd.arg("--mountpoint").arg(path).arg("--noheadings");
         ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
-        let output = cmd.output()?;
+        let output = command_runner::output(&mut cmd)?;
         Ok(output.status.success())
     }
 
@@ -316,7 +317,7 @@ impl DevicePathResolver {
             .arg("--first-only");
         ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
-        let output = cmd.output()?;
+        let output = command_runner::output(&mut cmd)?;
 
         if !output.status.success() {
             return Ok(None);
@@ -344,7 +345,7 @@ fn mount_device_privileged_impl(device: &str, mount_point: &Path) -> Result<(), 
     cmd.arg(device).arg(mount_point);
     ui::cmd_start(&ui::format_cmd(&cmd));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -371,7 +372,7 @@ fn mount_device_userspace_impl(device: &str) -> Result<PathBuf, BackupError> {
         .arg("--no-user-interaction");
     ui::cmd_start(&ui::format_cmd(&cmd));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         ui::cmd_stderr_output(&stderr);
@@ -401,7 +402,7 @@ fn unmount_privileged_impl(mount_point: &Path) -> Result<(), BackupError> {
     cmd.arg(mount_point);
     ui::cmd_start(&ui::format_cmd(&cmd));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -427,7 +428,7 @@ fn unmount_device_userspace_impl(device: &str) -> Result<(), BackupError> {
         .arg("--no-user-interaction");
     ui::cmd_start(&ui::format_cmd(&cmd));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -457,7 +458,7 @@ fn is_luks_device_privileged_impl(device: &str) -> Result<bool, BackupError> {
     cmd.arg("isLuks").arg(device);
     ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
     Ok(output.status.success())
 }
 
@@ -469,7 +470,7 @@ fn is_luks_device_userspace_impl(device: &str) -> Result<bool, BackupError> {
     cmd.arg("info").arg("--block-device").arg(&resolved);
     ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
     if !output.status.success() {
         return Ok(false);
     }
@@ -546,7 +547,7 @@ fn open_luks_device_privileged_impl(
             .arg(mapping_name);
         ui::cmd_start(&ui::format_cmd(&cmd));
 
-        let output = cmd.output()?;
+        let output = command_runner::output(&mut cmd)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             ui::cmd_stderr_output(&stderr);
@@ -568,14 +569,14 @@ fn open_luks_device_privileged_impl(
             device, mapping_name
         ));
 
-        let mut child = Command::new("cryptsetup")
-            .arg("open")
+        let mut cmd = Command::new("cryptsetup");
+        cmd.arg("open")
             .arg("--key-file")
             .arg("-")
             .arg(device)
             .arg(mapping_name)
-            .stdin(Stdio::piped())
-            .spawn()?;
+            .stdin(Stdio::piped());
+        let mut child = command_runner::spawn(&mut cmd)?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(passphrase.as_bytes())?;
         }
@@ -629,7 +630,7 @@ fn open_luks_device_userspace_impl(
         .arg("--no-user-interaction");
     ui::cmd_start(&ui::format_cmd(&cmd));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
     drop(temp_key);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -677,7 +678,7 @@ fn close_luks_device_privileged_impl(mapping_name: &str) -> Result<(), BackupErr
     cmd.arg("close").arg(mapping_name);
     ui::cmd_start(&ui::format_cmd(&cmd));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -712,7 +713,7 @@ fn close_luks_device_userspace_impl(mapping_name: &str) -> Result<(), BackupErro
         .arg("--no-user-interaction");
     ui::cmd_start(&ui::format_cmd(&cmd));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
     if !output.status.success() {
         UserspaceLuksRegistry::register(mapping_name, &source_device);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -874,6 +875,53 @@ mod tests {
         assert_eq!(guard.mount_point(), Path::new("/some/path"));
     }
 
+    #[test]
+    fn test_resolve_block_device_injected_findfs_failure() {
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(|cmd| {
+                if crate::test_util::command_program(cmd) == "findfs" {
+                    return Some(Ok(crate::test_util::mock_output(
+                        3,
+                        "",
+                        "injected findfs failure\n",
+                    )));
+                }
+                None
+            }),
+        );
+
+        let result = DevicePathResolver::resolve_block_device("UUID=deadbeef");
+        assert!(result.is_err());
+        assert!(
+            format!("{}", result.err().unwrap()).contains("Failed to resolve device identifier")
+        );
+    }
+
+    #[test]
+    fn test_resolve_block_device_injected_findfs_invalid_output() {
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(|cmd| {
+                if crate::test_util::command_program(cmd) == "findfs"
+                    && crate::test_util::command_args(cmd) == vec!["UUID=deadbeef".to_string()]
+                {
+                    return Some(Ok(crate::test_util::mock_output(
+                        0,
+                        "/tmp/not-a-device\n",
+                        "",
+                    )));
+                }
+                None
+            }),
+        );
+
+        let result = DevicePathResolver::resolve_block_device("UUID=deadbeef");
+        assert!(result.is_err());
+        assert!(
+            format!("{}", result.err().unwrap())
+                .contains("Resolved device identifier UUID=deadbeef to invalid block device path")
+        );
+    }
+
     // ── LUKS tests (require integration env) ────────────────────────────
 
     use crate::test_util::require_luks_test_device;
@@ -973,7 +1021,7 @@ mod tests {
         let dev = require_luks_test_device!("open_pass_env");
 
         if std::env::var("BTRBAK_TEST_LUKS_PASSPHRASE").is_err() {
-            eprintln!("Skipped: BTRBAK_TEST_LUKS_PASSPHRASE not set");
+            crate::test_util::skip_or_fail_test("Skipped: BTRBAK_TEST_LUKS_PASSPHRASE not set");
             return;
         }
 

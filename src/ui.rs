@@ -45,8 +45,13 @@ fn state() -> &'static UiState {
     UI.get_or_init(|| {
         let is_tty = std::io::stderr().is_terminal();
         console::set_colors_enabled(is_tty);
+        let verbosity = if cfg!(test) {
+            Verbosity::Quiet
+        } else {
+            Verbosity::Normal
+        };
         UiState {
-            verbosity: Verbosity::Normal,
+            verbosity,
             is_tty,
             mp: MultiProgress::new(),
         }

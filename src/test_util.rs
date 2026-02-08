@@ -1,7 +1,7 @@
 use crate::config::*;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -9,7 +9,12 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Tries to create and delete a temporary subvolume; returns `false` if
 /// the process lacks the required privileges (typically `CAP_SYS_ADMIN`).
 fn can_manage_btrfs(base: &Path) -> bool {
-    let probe = base.join(".btrbak_probe");
+    let probe = base.join(format!(
+        ".btrbak_probe_{}_{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+
     if crate::btrfs::create_subvolume(&probe).is_err() {
         return false;
     }
@@ -29,6 +34,23 @@ fn can_manage_btrfs_cached(env_var: &str, base: &Path) -> bool {
         &CACHE_RECV
     };
     *cache.get_or_init(|| can_manage_btrfs(base))
+}
+
+pub fn strict_integration_mode() -> bool {
+    std::env::var("BTRBAK_STRICT_INTEGRATION")
+        .map(|v| {
+            let v = v.to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+pub fn skip_or_fail_test(message: &str) {
+    if strict_integration_mode() {
+        panic!("{message}");
+    } else {
+        eprintln!("{message}");
+    }
 }
 
 /// RAII guard that creates a unique subdirectory under a btrfs test filesystem
@@ -60,10 +82,6 @@ impl BtrfsTestDir {
         };
 
         if !can_manage_btrfs_cached(env_var, &base) {
-            eprintln!(
-                "Skipped: insufficient privileges for btrfs operations on {}",
-                base.display()
-            );
             return None;
         }
 
@@ -122,7 +140,9 @@ macro_rules! require_btrfs_test_dir {
         match crate::test_util::BtrfsTestDir::new($name) {
             Some(td) => td,
             None => {
-                eprintln!("Skipped: BTRBAK_TEST_BTRFS_DIR not set or insufficient privileges");
+                crate::test_util::skip_or_fail_test(
+                    "Skipped: BTRBAK_TEST_BTRFS_DIR not set or insufficient privileges",
+                );
                 return;
             }
         }
@@ -139,7 +159,9 @@ macro_rules! require_btrfs_recv_dir {
         match crate::test_util::BtrfsTestDir::new_recv($name) {
             Some(td) => td,
             None => {
-                eprintln!("Skipped: BTRBAK_TEST_BTRFS_RECV_DIR not set or insufficient privileges");
+                crate::test_util::skip_or_fail_test(
+                    "Skipped: BTRBAK_TEST_BTRFS_RECV_DIR not set or insufficient privileges",
+                );
                 return;
             }
         }
@@ -184,13 +206,21 @@ pub struct LuksTestDevice {
     pub loop_device: String,
     pub keyfile: PathBuf,
     pub mapping_name: String,
+    _luks_test_lock: MutexGuard<'static, ()>,
 }
 
 impl LuksTestDevice {
+    fn test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     /// Build a `LuksTestDevice` from environment variables set by the
     /// integration test script.  Returns `None` (→ skip) when the env vars
     /// are unset or `cryptsetup` is unavailable.
     pub fn new(test_name: &str) -> Option<Self> {
+        let lock = Self::test_lock().lock().ok()?;
+
         let loop_device = match std::env::var("BTRBAK_TEST_LUKS_LOOP") {
             Ok(v) if !v.is_empty() => v,
             _ => return None,
@@ -208,6 +238,7 @@ impl LuksTestDevice {
             loop_device,
             keyfile,
             mapping_name,
+            _luks_test_lock: lock,
         })
     }
 
@@ -243,10 +274,94 @@ macro_rules! require_luks_test_device {
         match crate::test_util::LuksTestDevice::new($name) {
             Some(dev) => dev,
             None => {
-                eprintln!("Skipped: LUKS test device not available");
+                crate::test_util::skip_or_fail_test("Skipped: LUKS test device not available");
                 return;
             }
         }
     };
 }
 pub(crate) use require_luks_test_device;
+
+pub(crate) use crate::command_runner::CommandRunner;
+pub(crate) use crate::command_runner::ScopedCommandRunner;
+pub(crate) use crate::command_runner::scoped_command_runner;
+use std::process::{Child, Command, Output};
+use std::sync::Arc;
+
+pub fn find_executable_in_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub fn command_program(cmd: &std::process::Command) -> String {
+    cmd.get_program().to_string_lossy().to_string()
+}
+
+pub fn command_args(cmd: &std::process::Command) -> Vec<String> {
+    cmd.get_args()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect()
+}
+
+#[cfg(unix)]
+pub fn mock_output(exit_code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::Output {
+        status: std::process::ExitStatus::from_raw(exit_code << 8),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
+type OutputHook = dyn Fn(&mut Command) -> Option<std::io::Result<Output>> + Send + Sync + 'static;
+type SpawnHook = dyn Fn(&mut Command) -> Option<std::io::Result<Child>> + Send + Sync + 'static;
+
+pub struct HookCommandRunner {
+    output_hook: Option<Box<OutputHook>>,
+    spawn_hook: Option<Box<SpawnHook>>,
+}
+
+impl HookCommandRunner {
+    pub fn new() -> Self {
+        Self {
+            output_hook: None,
+            spawn_hook: None,
+        }
+    }
+
+    pub fn with_output_hook(
+        mut self,
+        hook: impl Fn(&mut Command) -> Option<std::io::Result<Output>> + Send + Sync + 'static,
+    ) -> Self {
+        self.output_hook = Some(Box::new(hook));
+        self
+    }
+
+    pub fn with_spawn_hook(
+        mut self,
+        hook: impl Fn(&mut Command) -> Option<std::io::Result<Child>> + Send + Sync + 'static,
+    ) -> Self {
+        self.spawn_hook = Some(Box::new(hook));
+        self
+    }
+}
+
+impl CommandRunner for HookCommandRunner {
+    fn output(&self, cmd: &mut Command) -> Option<std::io::Result<Output>> {
+        self.output_hook.as_ref().and_then(|hook| hook(cmd))
+    }
+
+    fn spawn(&self, cmd: &mut Command) -> Option<std::io::Result<Child>> {
+        self.spawn_hook.as_ref().and_then(|hook| hook(cmd))
+    }
+}
+
+pub fn scoped_hook_command_runner(runner: HookCommandRunner) -> ScopedCommandRunner {
+    scoped_command_runner(Arc::new(runner))
+}

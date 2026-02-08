@@ -1,5 +1,6 @@
 use crate::BackupError;
 use crate::btrfs;
+use crate::command_runner;
 use crate::config::{Config, SourceConfig, TargetConfig, TargetLocation};
 use crate::device;
 use crate::hooks;
@@ -138,7 +139,7 @@ impl<'a> SourceSnapshot<'a> {
             .arg("--print-number");
         ui::cmd_start(&ui::format_cmd(&cmd));
 
-        let output = cmd.output()?;
+        let output = command_runner::output(&mut cmd)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -206,12 +207,12 @@ impl<'a> SourceSnapshot<'a> {
         for &snapshot_id in backup_snapshots.iter().skip(2) {
             ui::detail(&format!("Deleting old snapper snapshot #{}", snapshot_id));
 
-            let output = Command::new("snapper")
-                .arg("-c")
+            let mut cmd = Command::new("snapper");
+            cmd.arg("-c")
                 .arg(config_name)
                 .arg("delete")
-                .arg(snapshot_id.to_string())
-                .output()?;
+                .arg(snapshot_id.to_string());
+            let output = command_runner::output(&mut cmd)?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -228,13 +229,13 @@ impl<'a> SourceSnapshot<'a> {
     fn list_btrbak_snapper_snapshot_ids(&self) -> Result<Vec<u64>, BackupError> {
         let config_name = self.snapper_config()?;
 
-        let output = Command::new("snapper")
-            .arg("-c")
+        let mut cmd = Command::new("snapper");
+        cmd.arg("-c")
             .arg(config_name)
             .arg("list")
             .arg("--columns")
-            .arg("number,description,type")
-            .output()?;
+            .arg("number,description,type");
+        let output = command_runner::output(&mut cmd)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -733,6 +734,8 @@ pub fn prepare_live_environment(
 mod tests {
     use super::*;
     use crate::config::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     fn make_config(num_sources: usize, enable_live_boot: bool) -> Config {
         let sources: Vec<SourceConfig> = (0..num_sources)
@@ -800,6 +803,183 @@ mod tests {
         );
         let msg = format!("{}", err);
         assert!(msg.contains("already running"));
+    }
+
+    #[test]
+    fn test_parse_snapper_snapshot_ids_filters_expected_single_only() {
+        let output = r#"
+# | number | description | type
+41 btrbak_test single
+42 btrbak_test pre
+43 other single
+abc btrbak_test single
+44 btrbak_test single
+"#;
+
+        let ids = SourceSnapshot::parse_btrbak_snapper_snapshot_ids(output, "btrbak_test");
+        assert_eq!(ids, vec![41, 44]);
+    }
+
+    #[test]
+    fn test_parse_snapper_snapshot_ids_ignores_malformed_lines() {
+        let output = r#"
+99
+100 only-two-columns
+   # comment
+"#;
+        let ids = SourceSnapshot::parse_btrbak_snapper_snapshot_ids(output, "btrbak_test");
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_create_snapper_snapshot_injected_command_failure() {
+        let source = SourceConfig {
+            path: PathBuf::from("/snapper-source"),
+            snapshot_dir: PathBuf::from(".snapshots"),
+            use_snapper: true,
+            snapshot_name: "btrbak".to_string(),
+            snapper_config: Some("root".to_string()),
+        };
+        let workflow = SourceSnapshot::new(&source, "test");
+
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(|cmd| {
+                if crate::test_util::command_program(cmd) == "snapper"
+                    && crate::test_util::command_args(cmd)
+                        .iter()
+                        .any(|arg| arg == "create")
+                {
+                    return Some(Ok(crate::test_util::mock_output(
+                        17,
+                        "",
+                        "injected snapper create failure\n",
+                    )));
+                }
+                None
+            }),
+        );
+
+        let result = workflow.create_snapper_snapshot();
+        assert!(result.is_err());
+        assert!(format!("{}", result.err().unwrap()).contains("Failed to create snapper snapshot"));
+    }
+
+    #[test]
+    fn test_create_snapper_snapshot_injected_invalid_id_output() {
+        let source = SourceConfig {
+            path: PathBuf::from("/snapper-source"),
+            snapshot_dir: PathBuf::from(".snapshots"),
+            use_snapper: true,
+            snapshot_name: "btrbak".to_string(),
+            snapper_config: Some("root".to_string()),
+        };
+        let workflow = SourceSnapshot::new(&source, "test");
+
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(|cmd| {
+                if crate::test_util::command_program(cmd) == "snapper"
+                    && crate::test_util::command_args(cmd)
+                        .iter()
+                        .any(|arg| arg == "create")
+                {
+                    return Some(Ok(crate::test_util::mock_output(0, "not-a-number\n", "")));
+                }
+                None
+            }),
+        );
+
+        let result = workflow.create_snapper_snapshot();
+        assert!(result.is_err());
+        assert!(format!("{}", result.err().unwrap()).contains("Failed to parse snapshot ID"));
+    }
+
+    #[test]
+    fn test_list_snapper_snapshot_ids_injected_command_failure() {
+        let source = SourceConfig {
+            path: PathBuf::from("/snapper-source"),
+            snapshot_dir: PathBuf::from(".snapshots"),
+            use_snapper: true,
+            snapshot_name: "btrbak".to_string(),
+            snapper_config: Some("root".to_string()),
+        };
+        let workflow = SourceSnapshot::new(&source, "test");
+
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(|cmd| {
+                if crate::test_util::command_program(cmd) == "snapper"
+                    && crate::test_util::command_args(cmd)
+                        .iter()
+                        .any(|arg| arg == "list")
+                {
+                    return Some(Ok(crate::test_util::mock_output(
+                        23,
+                        "",
+                        "injected snapper list failure\n",
+                    )));
+                }
+                None
+            }),
+        );
+
+        let result = workflow.list_btrbak_snapper_snapshot_ids();
+        assert!(result.is_err());
+        assert!(format!("{}", result.err().unwrap()).contains("Failed to list snapper snapshots"));
+    }
+
+    #[test]
+    fn test_cleanup_old_snapper_snapshots_list_failure_is_non_fatal() {
+        let source = SourceConfig {
+            path: PathBuf::from("/snapper-source"),
+            snapshot_dir: PathBuf::from(".snapshots"),
+            use_snapper: true,
+            snapshot_name: "btrbak".to_string(),
+            snapper_config: Some("root".to_string()),
+        };
+        let workflow = SourceSnapshot::new(&source, "test");
+
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(|cmd| {
+                if crate::test_util::command_program(cmd) == "snapper"
+                    && crate::test_util::command_args(cmd)
+                        .iter()
+                        .any(|arg| arg == "list")
+                {
+                    return Some(Ok(crate::test_util::mock_output(
+                        19,
+                        "",
+                        "injected snapper list failure\n",
+                    )));
+                }
+                None
+            }),
+        );
+
+        let result = workflow.cleanup_old_snapper_snapshots();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mount_target_mounted_path_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = make_config(1, false);
+        config.target.location = TargetLocation::MountedPath(tmp.path().to_path_buf());
+
+        let guard = mount_target(&config, crate::device::DeviceAccessMode::UserSpace).unwrap();
+        assert_eq!(guard.mount_point(), tmp.path());
+    }
+
+    #[test]
+    fn test_mount_target_mounted_path_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+
+        let mut config = make_config(1, false);
+        config.target.location = TargetLocation::MountedPath(missing);
+
+        let result = mount_target(&config, crate::device::DeviceAccessMode::UserSpace);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(format!("{}", err).contains("does not exist"));
     }
 
     // ========================
@@ -966,6 +1146,37 @@ mod tests {
     }
 
     #[test]
+    fn test_backup_send_snapshot_live_boot_layout() {
+        let td = require_btrfs_test_dir!("send_snap_liveboot");
+        let td_recv = require_btrfs_recv_dir!("send_snap_liveboot");
+
+        let src = td.path.join("src");
+        btrfs::create_subvolume(&src).unwrap();
+        write_test_file(&src, "f.txt", "content");
+
+        let snap_dir = src.join(".snapshots");
+        fs::create_dir_all(&snap_dir).unwrap();
+
+        let snap = snap_dir.join("btrbak_test");
+        btrfs::create_snapshot(&src, &snap).unwrap();
+
+        let target_dir = td_recv.path.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let source = make_source_config(&src, Path::new(".snapshots"));
+        let mut target_config = make_target_config(&target_dir);
+        target_config.enable_live_boot = true;
+
+        let stats = send_snapshot(&source, &target_config, &snap, None, &target_dir).unwrap();
+        assert!(stats.bytes > 0);
+
+        let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
+        let received = target_dir.join("@snapshots").join(&vol_name);
+        assert!(btrfs::is_subvolume(&received).unwrap());
+        assert!(!target_dir.join(&vol_name).exists());
+    }
+
+    #[test]
     fn test_backup_cleanup_old_snapshot_manual() {
         let td = require_btrfs_test_dir!("cleanup_manual");
 
@@ -996,6 +1207,27 @@ mod tests {
 
         // parent is None — should be a no-op
         cleanup_old_snapshot(&source, None, "test").unwrap();
+    }
+
+    #[test]
+    fn test_backup_cleanup_old_snapshot_non_subvolume_parent_is_noop() {
+        let td = require_btrfs_test_dir!("cleanup_plain_parent");
+
+        let src = td.path.join("src");
+        btrfs::create_subvolume(&src).unwrap();
+        let source = make_source_config(&src, Path::new(".snapshots"));
+
+        let plain_parent = src.join(".snapshots").join("btrbak_test_prev");
+        fs::create_dir_all(&plain_parent).unwrap();
+        fs::write(plain_parent.join("keep.txt"), "keep").unwrap();
+
+        cleanup_old_snapshot(&source, Some(plain_parent.clone()), "test").unwrap();
+
+        assert!(plain_parent.exists());
+        assert_eq!(
+            fs::read_to_string(plain_parent.join("keep.txt")).unwrap(),
+            "keep"
+        );
     }
 
     // --- End-to-end ---
@@ -1053,5 +1285,116 @@ mod tests {
         let target_vol = target_dir.join(&vol_name);
         assert!(btrfs::is_subvolume(&target_vol).unwrap());
         assert_eq!(fs::read_to_string(target_vol.join("v2.txt")).unwrap(), "v2");
+    }
+
+    #[test]
+    fn test_backup_single_source_send_failure_keeps_recoverable_state() {
+        let td = require_btrfs_test_dir!("e2e_send_fail_state");
+        let td_recv = require_btrfs_recv_dir!("e2e_send_fail_state");
+
+        let src = td.path.join("src");
+        btrfs::create_subvolume(&src).unwrap();
+        write_test_file(&src, "v1.txt", "v1");
+
+        let target_dir = td_recv.path.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let source = make_source_config(&src, Path::new(".snapshots"));
+        let target_config = make_target_config(&target_dir);
+
+        // Baseline successful backup.
+        backup_single_source(&source, &target_config, &target_dir, "test").unwrap();
+        let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
+        let target_vol = target_dir.join(&vol_name);
+        let target_id_before = btrfs::get_subvolume_id(&target_vol).unwrap();
+
+        // Prepare incremental update.
+        write_test_file(&src, "v2.txt", "v2");
+        let expected_snapshot = src.join(".snapshots").join("btrbak_test");
+        let expected_snapshot_s = expected_snapshot.display().to_string();
+
+        // Fail only the send for the freshly created snapshot path.
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_spawn_hook(move |cmd| {
+                let args = crate::test_util::command_args(cmd);
+                if crate::test_util::command_program(cmd) == "btrfs"
+                    && args.first().map(String::as_str) == Some("send")
+                    && args.last().map(String::as_str) == Some(expected_snapshot_s.as_str())
+                {
+                    let mut fail = std::process::Command::new("sh");
+                    fail.arg("-c")
+                        .arg("echo \"injected send failure\" >&2; exit 55")
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped());
+                    return Some(fail.spawn());
+                }
+                None
+            }),
+        );
+
+        let result = backup_single_source(&source, &target_config, &target_dir, "test");
+        assert!(result.is_err());
+
+        // Local snapshots should remain for retry: current + prev both present.
+        let snap_current = src.join(".snapshots").join("btrbak_test");
+        let snap_prev = src.join(".snapshots").join("btrbak_test_prev");
+        assert!(btrfs::is_subvolume(&snap_current).unwrap());
+        assert!(btrfs::is_subvolume(&snap_prev).unwrap());
+
+        // Target should stay at previous generation, with no backup residue.
+        assert!(btrfs::is_subvolume(&target_vol).unwrap());
+        assert_eq!(
+            btrfs::get_subvolume_id(&target_vol).unwrap(),
+            target_id_before
+        );
+        assert_eq!(fs::read_to_string(target_vol.join("v1.txt")).unwrap(), "v1");
+        assert!(!target_vol.join("v2.txt").exists());
+        assert!(!target_dir.join(format!("{}.old", vol_name)).exists());
+    }
+
+    #[test]
+    fn test_run_backup_dry_run_has_no_side_effects() {
+        let td = require_btrfs_test_dir!("run_backup_dry_run");
+        let td_recv = require_btrfs_recv_dir!("run_backup_dry_run");
+
+        let src = td.path.join("src");
+        btrfs::create_subvolume(&src).unwrap();
+        write_test_file(&src, "seed.txt", "seed");
+
+        let target_dir = td_recv.path.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let mut cfg_file = NamedTempFile::new().unwrap();
+        let escaped_src = src
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let escaped_target = target_dir
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let cfg = format!(
+            r#"
+name = "dry_run_only"
+
+[[sources]]
+path = "{escaped_src}"
+snapshot_dir = ".snapshots"
+use_snapper = false
+snapshot_name = "btrbak"
+
+[target]
+location = "{escaped_target}"
+enable_live_boot = false
+"#
+        );
+        cfg_file.write_all(cfg.as_bytes()).unwrap();
+
+        run_backup(cfg_file.path(), true, false).unwrap();
+
+        assert!(!src.join(".snapshots").exists());
+        assert!(fs::read_dir(&target_dir).unwrap().next().is_none());
     }
 }

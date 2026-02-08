@@ -1,4 +1,5 @@
 use crate::btrfs;
+use crate::command_runner;
 use crate::error::BackupError;
 use crate::ui;
 use std::fs;
@@ -271,7 +272,7 @@ fn get_device_uuid(mount_point: &Path) -> Result<String, BackupError> {
         .arg("--first-only");
     ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
 
-    let output = cmd.output()?;
+    let output = command_runner::output(&mut cmd)?;
 
     if !output.status.success() {
         return Err(BackupError::Hook(format!(

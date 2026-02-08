@@ -18,8 +18,7 @@ fn can_manage_btrfs(base: &Path) -> bool {
     if crate::btrfs::create_subvolume(&probe).is_err() {
         return false;
     }
-    let _ = crate::btrfs::delete_subvolume(&probe);
-    true
+    crate::btrfs::delete_subvolume(&probe).is_ok()
 }
 
 /// Cached privilege check for the source and receive filesystems.

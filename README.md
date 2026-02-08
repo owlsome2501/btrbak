@@ -259,44 +259,65 @@ make check             # cargo check
 make clippy            # cargo clippy -- -D warnings
 make fmt               # cargo fmt
 make fmt-check         # cargo fmt -- --check
-make test              # unit tests (no root required)
-make test-integration  # integration tests (prefers udisksctl, fallback sudo)
+make test                         # tests that need no env and no root
+make test-no-root          # same as `make test`
+make test-prepare-root-env     # create mounted btrfs test environment for root-required tests
+make test-root-required          # tests that need root privileges
+make test-cleanup-root-env     # cleanup mounted btrfs test environment
+make test-integration             # external integration tests in tests/
 make clean             # cargo clean
 make install           # cargo install --path .
 ```
 
-### Unit tests
+### Tests Without Env/Root
 
-Unit tests cover configuration parsing, error handling, UI formatting, volume naming,
-and other logic that does not require a real btrfs filesystem:
+These tests are regular unit tests that do not require pre-mounted filesystems
+or root permissions:
 
 ```bash
-make test
-# or
-cargo test
+make test-no-root
 ```
 
-### Integration tests
+### Root-Required Tests
 
-Integration tests exercise real btrfs operations (subvolume create/delete, snapshot,
-send/receive, incremental backup) on temporary img-backed btrfs filesystems.
+These tests require root privileges (mount/LUKS, btrfs send/receive, and
+`btrfs ... show`-dependent checks):
+
+```bash
+bash scripts/prepare-root-test-env.sh
+source <env.sh path printed by prepare script>
+bash scripts/test-root-required.sh
+bash scripts/cleanup-root-test-env.sh
+```
+
+The script first runs `cargo test --no-run`, then executes only tests matching
+`root_required_tests` with `sudo`, so other test categories are not run.
+
+For non-interactive runs, `scripts/test-root-required.sh` can read sudo
+password from `BTRBAK_SUDO_PASSWORD_FILE` (default is empty; no password file
+is used unless explicitly set). Trailing CR/LF in that file is stripped before
+passing to `sudo -S`.
+
+### Rust Integration Tests
+
+`tests/backup_workflow_integration.rs` contains external integration tests using
+Rust's official `tests/` layout. Run them with:
 
 ```bash
 make test-integration
+# or
+cargo test --test backup_workflow_integration
 ```
 
-The script `scripts/test-integration.sh` handles all setup and teardown automatically:
+These tests exercise cross-module backup workflow behavior. They expect
+`BTRBAK_TEST_BTRFS_DIR` and `BTRBAK_TEST_BTRFS_RECV_DIR` to point to mounted
+btrfs filesystems.
 
-1. Creates two sparse img files (default 512 MB each, configurable via `IMG_SIZE`)
-2. Preferentially uses `udisksctl` + UDisks2 D-Bus `Block.Format` to create loop devices, format btrfs, and mount
-3. Runs `cargo test` with `BTRBAK_TEST_BTRFS_DIR` and `BTRBAK_TEST_BTRFS_RECV_DIR` set
-4. Unmounts and removes the img files on exit
+For root-only workflow tests in `tests/backup_workflow_integration.rs`, use:
 
-If `udisksctl` is unavailable, the script falls back to `sudo` for setup/teardown.
-If both user-space tooling and `sudo` are unavailable, integration tests are skipped cleanly.
-When `cryptsetup` is available, the script also prepares a LUKS test device in user space.
-Tests that require btrfs privileges also detect this at runtime and skip automatically,
-so a plain `cargo test` always succeeds regardless of the environment.
+```bash
+cargo test --test backup_workflow_integration root_required_tests
+```
 
 ## Security Considerations
 

@@ -160,7 +160,7 @@ fn find_btrfs_device(mount_point: &Path) -> Result<String, BackupError> {
 mod tests {
     use super::*;
     use crate::config::{BootloaderType, LiveBootConfig};
-    use crate::test_util::{HookCommandRunner, require_btrfs_test_dir, scoped_hook_command_runner};
+    use crate::test_util::{HookCommandRunner, scoped_hook_command_runner};
     use std::path::PathBuf;
 
     #[test]
@@ -211,47 +211,52 @@ mod tests {
         assert!(content.contains("options quiet rw"));
     }
 
-    #[test]
-    fn test_prepare_live_boot_creates_subvolumes_without_esp() {
-        let td = require_btrfs_test_dir!("liveboot_prepare_create");
+    mod root_required_tests_show_ops {
+        use super::*;
+        use crate::test_util::require_btrfs_test_dir;
 
-        let config = LiveBootConfig {
-            esp_path: td.path.join("esp-missing"),
-            bootloader: BootloaderType::SystemdBoot,
-            boot_entry: BootEntryConfig::default(),
-        };
+        #[test]
+        fn test_prepare_live_boot_creates_subvolumes_without_esp() {
+            let td = require_btrfs_test_dir!("liveboot_prepare_create");
 
-        prepare_live_boot(&td.path, &config, "@", "@snapshots").unwrap();
+            let config = LiveBootConfig {
+                esp_path: td.path.join("esp-missing"),
+                bootloader: BootloaderType::SystemdBoot,
+                boot_entry: BootEntryConfig::default(),
+            };
 
-        assert!(btrfs::is_subvolume(&td.path.join("@")).unwrap());
-        assert!(btrfs::is_subvolume(&td.path.join("@snapshots")).unwrap());
-    }
+            prepare_live_boot(&td.path, &config, "@", "@snapshots").unwrap();
 
-    #[test]
-    fn test_prepare_live_boot_is_idempotent_when_subvolumes_exist() {
-        let td = require_btrfs_test_dir!("liveboot_prepare_idempotent");
+            assert!(btrfs::is_subvolume(&td.path.join("@")).unwrap());
+            assert!(btrfs::is_subvolume(&td.path.join("@snapshots")).unwrap());
+        }
 
-        let root = td.path.join("@");
-        let snaps = td.path.join("@snapshots");
-        btrfs::create_subvolume(&root).unwrap();
-        btrfs::create_subvolume(&snaps).unwrap();
+        #[test]
+        fn test_prepare_live_boot_is_idempotent_when_subvolumes_exist() {
+            let td = require_btrfs_test_dir!("liveboot_prepare_idempotent");
 
-        let root_id_before = btrfs::get_subvolume_id(&root).unwrap();
-        let snaps_id_before = btrfs::get_subvolume_id(&snaps).unwrap();
+            let root = td.path.join("@");
+            let snaps = td.path.join("@snapshots");
+            btrfs::create_subvolume(&root).unwrap();
+            btrfs::create_subvolume(&snaps).unwrap();
 
-        let config = LiveBootConfig {
-            esp_path: td.path.join("esp-missing"),
-            bootloader: BootloaderType::SystemdBoot,
-            boot_entry: BootEntryConfig::default(),
-        };
+            let root_id_before = btrfs::get_subvolume_id(&root).unwrap();
+            let snaps_id_before = btrfs::get_subvolume_id(&snaps).unwrap();
 
-        prepare_live_boot(&td.path, &config, "@", "@snapshots").unwrap();
+            let config = LiveBootConfig {
+                esp_path: td.path.join("esp-missing"),
+                bootloader: BootloaderType::SystemdBoot,
+                boot_entry: BootEntryConfig::default(),
+            };
 
-        let root_id_after = btrfs::get_subvolume_id(&root).unwrap();
-        let snaps_id_after = btrfs::get_subvolume_id(&snaps).unwrap();
+            prepare_live_boot(&td.path, &config, "@", "@snapshots").unwrap();
 
-        assert_eq!(root_id_before, root_id_after);
-        assert_eq!(snaps_id_before, snaps_id_after);
+            let root_id_after = btrfs::get_subvolume_id(&root).unwrap();
+            let snaps_id_after = btrfs::get_subvolume_id(&snaps).unwrap();
+
+            assert_eq!(root_id_before, root_id_after);
+            assert_eq!(snaps_id_before, snaps_id_after);
+        }
     }
 
     #[test]

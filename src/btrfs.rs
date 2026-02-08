@@ -340,7 +340,9 @@ pub fn find_latest_snapshot(snapshot_dir: &Path) -> Result<Option<PathBuf>, Back
         let b_meta = std::fs::metadata(b).ok();
         let a_time = a_meta.and_then(|m| m.modified().ok());
         let b_time = b_meta.and_then(|m| m.modified().ok());
-        b_time.cmp(&a_time) // reverse order
+        // Reverse by mtime. If equal (common on coarse timestamp resolution),
+        // fall back to reverse lexical path order for deterministic behavior.
+        b_time.cmp(&a_time).then_with(|| b.cmp(a))
     });
 
     Ok(snapshots.first().cloned())
@@ -759,12 +761,29 @@ pub fn get_subvolume_name_with_suffix(path: &Path) -> String {
 
 /// Check if a path is a btrfs filesystem
 pub fn is_btrfs_filesystem(path: &Path) -> Result<bool, BackupError> {
-    let mut cmd = Command::new("btrfs");
-    cmd.arg("filesystem").arg("show").arg(path);
-    ui::detail(&format!("$ {}", ui::format_cmd(&cmd)));
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
 
-    let output = command_runner::output(&mut cmd)?;
-    Ok(output.status.success())
+    const BTRFS_SUPER_MAGIC: libc::c_long = 0x9123_683E;
+
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        BackupError::Btrfs(format!(
+            "Path contains interior NUL byte: {}",
+            path.display()
+        ))
+    })?;
+
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: c_path is a valid NUL-terminated C string and stat points to
+    // writable memory for libc to initialize.
+    let rc = unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(BackupError::Io(std::io::Error::last_os_error()));
+    }
+
+    // SAFETY: statfs succeeded, so stat has been fully initialized by libc.
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.f_type as libc::c_long) == BTRFS_SUPER_MAGIC)
 }
 
 #[cfg(test)]
@@ -910,865 +929,940 @@ mod tests {
     // Integration tests (require BTRBAK_TEST_BTRFS_DIR)
     // ========================
 
-    use crate::test_util::{
-        HookCommandRunner, find_executable_in_path, require_btrfs_recv_dir, require_btrfs_test_dir,
-        scoped_hook_command_runner, write_test_file,
-    };
+    mod root_required_tests_show_ops {
+        use super::*;
+        use crate::test_util::{
+            HookCommandRunner, require_btrfs_test_dir, scoped_hook_command_runner, write_test_file,
+        };
 
-    // --- Subvolume basic operations ---
+        // --- Subvolume basic operations ---
 
-    #[test]
-    fn test_btrfs_create_subvolume_and_is_subvolume() {
-        let td = require_btrfs_test_dir!("create_subvol");
+        #[test]
+        fn test_btrfs_create_subvolume_and_is_subvolume() {
+            let td = require_btrfs_test_dir!("create_subvol");
 
-        let sv = td.path.join("sv");
-        create_subvolume(&sv).unwrap();
-        assert!(is_subvolume(&sv).unwrap());
+            let sv = td.path.join("sv");
+            create_subvolume(&sv).unwrap();
+            assert!(is_subvolume(&sv).unwrap());
 
-        // Plain directory should NOT be a subvolume
-        let plain = td.path.join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-        assert!(!is_subvolume(&plain).unwrap());
+            // Plain directory should NOT be a subvolume
+            let plain = td.path.join("plain");
+            std::fs::create_dir_all(&plain).unwrap();
+            assert!(!is_subvolume(&plain).unwrap());
+        }
+
+        #[test]
+        fn test_btrfs_create_subvolume_already_exists() {
+            let td = require_btrfs_test_dir!("create_subvol_exists");
+
+            let sv = td.path.join("sv");
+            create_subvolume(&sv).unwrap();
+            let err = create_subvolume(&sv);
+            assert!(err.is_err());
+            assert!(matches!(err.unwrap_err(), BackupError::Btrfs(_)));
+        }
+
+        #[test]
+        fn test_btrfs_delete_subvolume() {
+            let td = require_btrfs_test_dir!("delete_subvol");
+
+            let sv = td.path.join("sv");
+            create_subvolume(&sv).unwrap();
+            assert!(sv.exists());
+
+            delete_subvolume(&sv).unwrap();
+            assert!(!sv.exists());
+        }
+
+        #[test]
+        fn test_btrfs_delete_subvolume_nonexistent() {
+            let td = require_btrfs_test_dir!("delete_subvol_noent");
+
+            let sv = td.path.join("does_not_exist");
+            let err = delete_subvolume(&sv);
+            assert!(err.is_err());
+        }
+
+        #[test]
+        fn test_btrfs_rename_subvolume() {
+            let td = require_btrfs_test_dir!("rename_subvol");
+
+            let old = td.path.join("old_sv");
+            let new = td.path.join("new_sv");
+            create_subvolume(&old).unwrap();
+
+            rename_subvolume(&old, &new).unwrap();
+            assert!(!old.exists());
+            assert!(is_subvolume(&new).unwrap());
+        }
+
+        #[test]
+        fn test_btrfs_get_subvolume_id() {
+            let td = require_btrfs_test_dir!("get_subvol_id");
+
+            let sv = td.path.join("sv");
+            create_subvolume(&sv).unwrap();
+
+            let id = get_subvolume_id(&sv).unwrap();
+            assert!(id > 0);
+        }
+
+        #[test]
+        fn test_btrfs_get_subvolume_id_not_subvolume() {
+            let td = require_btrfs_test_dir!("get_subvol_id_plain");
+
+            let plain = td.path.join("plain");
+            std::fs::create_dir_all(&plain).unwrap();
+
+            let err = get_subvolume_id(&plain);
+            assert!(err.is_err());
+        }
+
+        #[test]
+        fn test_btrfs_is_btrfs_filesystem() {
+            let td = require_btrfs_test_dir!("is_btrfs_fs");
+            assert!(is_btrfs_filesystem(&td.path).unwrap());
+        }
+
+        #[test]
+        fn test_btrfs_is_btrfs_filesystem_nested_path() {
+            let td = require_btrfs_test_dir!("is_btrfs_fs_nested");
+            let nested = td.path.join("nested").join("target");
+            std::fs::create_dir_all(&nested).unwrap();
+            assert!(is_btrfs_filesystem(&nested).unwrap());
+        }
+
+        // --- Snapshot operations ---
+
+        #[test]
+        fn test_btrfs_create_snapshot_readonly() {
+            let td = require_btrfs_test_dir!("snap_ro");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "hello.txt", "world");
+
+            let snap = td.path.join("snap_ro");
+            create_snapshot(&src, &snap).unwrap();
+            assert!(is_subvolume(&snap).unwrap());
+
+            // Snapshot contains the source file
+            assert_eq!(
+                std::fs::read_to_string(snap.join("hello.txt")).unwrap(),
+                "world"
+            );
+
+            // Writing to read-only snapshot should fail
+            let write_result = std::fs::write(snap.join("new.txt"), "fail");
+            assert!(write_result.is_err());
+        }
+
+        #[test]
+        fn test_btrfs_create_snapshot_rw() {
+            let td = require_btrfs_test_dir!("snap_rw");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "hello.txt", "world");
+
+            let snap = td.path.join("snap_rw");
+            create_snapshot_rw(&src, &snap).unwrap();
+            assert!(is_subvolume(&snap).unwrap());
+
+            assert_eq!(
+                std::fs::read_to_string(snap.join("hello.txt")).unwrap(),
+                "world"
+            );
+
+            // Writing to read-write snapshot should succeed
+            std::fs::write(snap.join("new.txt"), "ok").unwrap();
+            assert_eq!(std::fs::read_to_string(snap.join("new.txt")).unwrap(), "ok");
+        }
+
+        // --- find_latest_snapshot ---
+
+        #[test]
+        fn test_btrfs_find_latest_snapshot_empty() {
+            let td = require_btrfs_test_dir!("find_latest_empty");
+
+            let snap_dir = td.path.join("snapshots");
+            std::fs::create_dir_all(&snap_dir).unwrap();
+
+            let result = find_latest_snapshot(&snap_dir).unwrap();
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn test_btrfs_find_latest_snapshot_single() {
+            let td = require_btrfs_test_dir!("find_latest_single");
+
+            let snap_dir = td.path.join("snapshots");
+            std::fs::create_dir_all(&snap_dir).unwrap();
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+
+            let snap = snap_dir.join("snap1");
+            create_snapshot(&src, &snap).unwrap();
+
+            let result = find_latest_snapshot(&snap_dir).unwrap();
+            assert_eq!(result.unwrap(), snap);
+        }
+
+        #[test]
+        fn test_btrfs_find_latest_snapshot_multiple() {
+            let td = require_btrfs_test_dir!("find_latest_multi");
+
+            let snap_dir = td.path.join("snapshots");
+            std::fs::create_dir_all(&snap_dir).unwrap();
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+
+            let snap1 = snap_dir.join("snap1");
+            create_snapshot(&src, &snap1).unwrap();
+
+            // Brief pause to ensure different mtime
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            let snap2 = snap_dir.join("snap2");
+            create_snapshot(&src, &snap2).unwrap();
+
+            let result = find_latest_snapshot(&snap_dir).unwrap();
+            assert_eq!(result.unwrap(), snap2);
+        }
+
+        #[test]
+        fn test_btrfs_find_latest_snapshot_nonexistent_dir() {
+            let td = require_btrfs_test_dir!("find_latest_nodir");
+
+            let result = find_latest_snapshot(&td.path.join("no_such_dir")).unwrap();
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn test_btrfs_snapshot_and_replace_safely() {
+            let td = require_btrfs_test_dir!("snap_replace");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "data.txt", "hello");
+
+            let snap = td.path.join("snap");
+            create_snapshot(&src, &snap).unwrap();
+
+            let target = td.path.join("target");
+
+            snapshot_and_replace_safely(&target, &snap, "old").unwrap();
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("data.txt")).unwrap(),
+                "hello"
+            );
+
+            // Replace again to exercise existing-target path
+            write_test_file(&src, "data2.txt", "world");
+            let snap2 = td.path.join("snap2");
+            create_snapshot(&src, &snap2).unwrap();
+
+            snapshot_and_replace_safely(&target, &snap2, "old").unwrap();
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("data2.txt")).unwrap(),
+                "world"
+            );
+            assert!(!td.path.join("target.old").exists());
+        }
+
+        #[test]
+        fn test_btrfs_snapshot_and_replace_safely_rejects_non_subvolume_target_and_cleans_temp() {
+            let td = require_btrfs_test_dir!("snap_replace_plain_target");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "data.txt", "hello");
+
+            let snap = td.path.join("snap");
+            create_snapshot(&src, &snap).unwrap();
+
+            // Existing plain directory target: should fail safely.
+            let target = td.path.join("target");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("marker.txt"), "keep").unwrap();
+
+            let err = snapshot_and_replace_safely(&target, &snap, "old");
+            assert!(err.is_err());
+
+            // Original directory remains in place and unchanged.
+            assert!(target.is_dir());
+            assert_eq!(
+                std::fs::read_to_string(target.join("marker.txt")).unwrap(),
+                "keep"
+            );
+
+            // Temporary and backup paths should not be left behind.
+            assert!(!td.path.join("target.new").exists());
+            assert!(!td.path.join("target.old").exists());
+        }
+
+        #[test]
+        fn test_btrfs_snapshot_and_replace_safely_delete_backup_failure_keeps_recoverable_state() {
+            let td = require_btrfs_test_dir!("snap_replace_delete_fail");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "v1.txt", "v1");
+
+            let snap1 = td.path.join("snap1");
+            create_snapshot(&src, &snap1).unwrap();
+
+            let target = td.path.join("target");
+            snapshot_and_replace_safely(&target, &snap1, "old").unwrap();
+
+            write_test_file(&src, "v2.txt", "v2");
+            let snap2 = td.path.join("snap2");
+            create_snapshot(&src, &snap2).unwrap();
+
+            let target_old = td.path.join("target.old");
+            let target_old_s = target_old.display().to_string();
+
+            let _runner =
+                scoped_hook_command_runner(HookCommandRunner::new().with_output_hook(move |cmd| {
+                    let args = crate::test_util::command_args(cmd);
+                    if crate::test_util::command_program(cmd) == "btrfs"
+                        && args.as_slice()
+                            == &[
+                                "subvolume".to_string(),
+                                "delete".to_string(),
+                                target_old_s.clone(),
+                            ]
+                    {
+                        return Some(Ok(crate::test_util::mock_output(
+                            73,
+                            "",
+                            "injected delete failure\n",
+                        )));
+                    }
+                    None
+                }));
+
+            let result = snapshot_and_replace_safely(&target, &snap2, "old");
+            assert!(result.is_err());
+
+            // New target is in place, old target remains as backup, and no .new residue.
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("v2.txt")).unwrap(),
+                "v2"
+            );
+
+            assert!(is_subvolume(&target_old).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target_old.join("v1.txt")).unwrap(),
+                "v1"
+            );
+
+            assert!(!td.path.join("target.new").exists());
+        }
+
+        #[test]
+        fn test_btrfs_move_and_replace_safely() {
+            let td = require_btrfs_test_dir!("move_replace");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "orig.txt", "orig");
+
+            // Create initial target
+            let target = td.path.join("target");
+            create_subvolume(&target).unwrap();
+            write_test_file(&target, "old.txt", "old");
+
+            // Create new subvolume to replace target with
+            let new_sv = td.path.join("new_sv");
+            create_subvolume(&new_sv).unwrap();
+            write_test_file(&new_sv, "new.txt", "new");
+
+            move_and_replace_safely(&target, &new_sv, "old").unwrap();
+
+            assert!(!new_sv.exists());
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("new.txt")).unwrap(),
+                "new"
+            );
+            assert!(!td.path.join("target.old").exists());
+        }
+
+        #[test]
+        fn test_btrfs_move_and_replace_safely_no_target() {
+            let td = require_btrfs_test_dir!("move_replace_notarget");
+
+            let target = td.path.join("target");
+            let new_sv = td.path.join("new_sv");
+            create_subvolume(&new_sv).unwrap();
+            write_test_file(&new_sv, "file.txt", "data");
+
+            move_and_replace_safely(&target, &new_sv, "old").unwrap();
+
+            assert!(!new_sv.exists());
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("file.txt")).unwrap(),
+                "data"
+            );
+        }
+
+        #[test]
+        fn test_btrfs_move_and_replace_safely_rolls_back_source_on_invalid_target() {
+            let td = require_btrfs_test_dir!("move_replace_plain_target");
+
+            // Existing plain directory target causes rename_subvolume(target, target.old)
+            // to fail validation and should trigger rollback.
+            let target = td.path.join("target");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("marker.txt"), "keep").unwrap();
+
+            let source = td.path.join("source_sv");
+            create_subvolume(&source).unwrap();
+            write_test_file(&source, "payload.txt", "payload");
+
+            let err = move_and_replace_safely(&target, &source, "old");
+            assert!(err.is_err());
+
+            // Source subvolume must be restored to original location.
+            assert!(is_subvolume(&source).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(source.join("payload.txt")).unwrap(),
+                "payload"
+            );
+
+            // Target directory stays intact.
+            assert!(target.is_dir());
+            assert_eq!(
+                std::fs::read_to_string(target.join("marker.txt")).unwrap(),
+                "keep"
+            );
+
+            assert!(!td.path.join("target.new").exists());
+            assert!(!td.path.join("target.old").exists());
+        }
+
+        #[test]
+        fn test_btrfs_move_and_replace_safely_delete_backup_failure_keeps_recoverable_state() {
+            let td = require_btrfs_test_dir!("move_replace_delete_fail");
+
+            let target = td.path.join("target");
+            create_subvolume(&target).unwrap();
+            write_test_file(&target, "old.txt", "old");
+
+            let source = td.path.join("source_sv");
+            create_subvolume(&source).unwrap();
+            write_test_file(&source, "new.txt", "new");
+
+            let target_old = td.path.join("target.old");
+            let target_old_s = target_old.display().to_string();
+
+            let _runner =
+                scoped_hook_command_runner(HookCommandRunner::new().with_output_hook(move |cmd| {
+                    let args = crate::test_util::command_args(cmd);
+                    if crate::test_util::command_program(cmd) == "btrfs"
+                        && args.as_slice()
+                            == &[
+                                "subvolume".to_string(),
+                                "delete".to_string(),
+                                target_old_s.clone(),
+                            ]
+                    {
+                        return Some(Ok(crate::test_util::mock_output(
+                            74,
+                            "",
+                            "injected delete failure\n",
+                        )));
+                    }
+                    None
+                }));
+
+            let result = move_and_replace_safely(&target, &source, "old");
+            assert!(result.is_err());
+
+            // New target remains, source moved, old backup retained for recovery.
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("new.txt")).unwrap(),
+                "new"
+            );
+            assert!(!source.exists());
+
+            assert!(is_subvolume(&target_old).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target_old.join("old.txt")).unwrap(),
+                "old"
+            );
+            assert!(!td.path.join("target.new").exists());
+        }
     }
 
-    #[test]
-    fn test_btrfs_create_subvolume_already_exists() {
-        let td = require_btrfs_test_dir!("create_subvol_exists");
-
-        let sv = td.path.join("sv");
-        create_subvolume(&sv).unwrap();
-        let err = create_subvolume(&sv);
-        assert!(err.is_err());
-        assert!(matches!(err.unwrap_err(), BackupError::Btrfs(_)));
-    }
-
-    #[test]
-    fn test_btrfs_delete_subvolume() {
-        let td = require_btrfs_test_dir!("delete_subvol");
-
-        let sv = td.path.join("sv");
-        create_subvolume(&sv).unwrap();
-        assert!(sv.exists());
-
-        delete_subvolume(&sv).unwrap();
-        assert!(!sv.exists());
-    }
-
-    #[test]
-    fn test_btrfs_delete_subvolume_nonexistent() {
-        let td = require_btrfs_test_dir!("delete_subvol_noent");
-
-        let sv = td.path.join("does_not_exist");
-        let err = delete_subvolume(&sv);
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn test_btrfs_rename_subvolume() {
-        let td = require_btrfs_test_dir!("rename_subvol");
-
-        let old = td.path.join("old_sv");
-        let new = td.path.join("new_sv");
-        create_subvolume(&old).unwrap();
-
-        rename_subvolume(&old, &new).unwrap();
-        assert!(!old.exists());
-        assert!(is_subvolume(&new).unwrap());
-    }
-
-    #[test]
-    fn test_btrfs_get_subvolume_id() {
-        let td = require_btrfs_test_dir!("get_subvol_id");
-
-        let sv = td.path.join("sv");
-        create_subvolume(&sv).unwrap();
-
-        let id = get_subvolume_id(&sv).unwrap();
-        assert!(id > 0);
-    }
-
-    #[test]
-    fn test_btrfs_get_subvolume_id_not_subvolume() {
-        let td = require_btrfs_test_dir!("get_subvol_id_plain");
-
-        let plain = td.path.join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-
-        let err = get_subvolume_id(&plain);
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn test_btrfs_is_btrfs_filesystem() {
-        let td = require_btrfs_test_dir!("is_btrfs_fs");
-        assert!(is_btrfs_filesystem(&td.path).unwrap());
-    }
-
-    // --- Snapshot operations ---
-
-    #[test]
-    fn test_btrfs_create_snapshot_readonly() {
-        let td = require_btrfs_test_dir!("snap_ro");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "hello.txt", "world");
-
-        let snap = td.path.join("snap_ro");
-        create_snapshot(&src, &snap).unwrap();
-        assert!(is_subvolume(&snap).unwrap());
-
-        // Snapshot contains the source file
-        assert_eq!(
-            std::fs::read_to_string(snap.join("hello.txt")).unwrap(),
-            "world"
-        );
-
-        // Writing to read-only snapshot should fail
-        let write_result = std::fs::write(snap.join("new.txt"), "fail");
-        assert!(write_result.is_err());
-    }
-
-    #[test]
-    fn test_btrfs_create_snapshot_rw() {
-        let td = require_btrfs_test_dir!("snap_rw");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "hello.txt", "world");
-
-        let snap = td.path.join("snap_rw");
-        create_snapshot_rw(&src, &snap).unwrap();
-        assert!(is_subvolume(&snap).unwrap());
-
-        assert_eq!(
-            std::fs::read_to_string(snap.join("hello.txt")).unwrap(),
-            "world"
-        );
-
-        // Writing to read-write snapshot should succeed
-        std::fs::write(snap.join("new.txt"), "ok").unwrap();
-        assert_eq!(std::fs::read_to_string(snap.join("new.txt")).unwrap(), "ok");
-    }
-
-    // --- find_latest_snapshot ---
-
-    #[test]
-    fn test_btrfs_find_latest_snapshot_empty() {
-        let td = require_btrfs_test_dir!("find_latest_empty");
-
-        let snap_dir = td.path.join("snapshots");
-        std::fs::create_dir_all(&snap_dir).unwrap();
-
-        let result = find_latest_snapshot(&snap_dir).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_btrfs_find_latest_snapshot_single() {
-        let td = require_btrfs_test_dir!("find_latest_single");
-
-        let snap_dir = td.path.join("snapshots");
-        std::fs::create_dir_all(&snap_dir).unwrap();
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-
-        let snap = snap_dir.join("snap1");
-        create_snapshot(&src, &snap).unwrap();
-
-        let result = find_latest_snapshot(&snap_dir).unwrap();
-        assert_eq!(result.unwrap(), snap);
-    }
-
-    #[test]
-    fn test_btrfs_find_latest_snapshot_multiple() {
-        let td = require_btrfs_test_dir!("find_latest_multi");
-
-        let snap_dir = td.path.join("snapshots");
-        std::fs::create_dir_all(&snap_dir).unwrap();
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-
-        let snap1 = snap_dir.join("snap1");
-        create_snapshot(&src, &snap1).unwrap();
-
-        // Brief pause to ensure different mtime
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        let snap2 = snap_dir.join("snap2");
-        create_snapshot(&src, &snap2).unwrap();
-
-        let result = find_latest_snapshot(&snap_dir).unwrap();
-        assert_eq!(result.unwrap(), snap2);
-    }
-
-    #[test]
-    fn test_btrfs_find_latest_snapshot_nonexistent_dir() {
-        let td = require_btrfs_test_dir!("find_latest_nodir");
-
-        let result = find_latest_snapshot(&td.path.join("no_such_dir")).unwrap();
-        assert!(result.is_none());
-    }
-
-    // --- Send / Receive ---
-
-    #[test]
-    fn test_btrfs_send_and_receive_piped() {
-        let td = require_btrfs_test_dir!("send_recv_piped");
-        let td_recv = require_btrfs_recv_dir!("send_recv_piped");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "data.txt", "payload");
-
-        // Create read-only snapshot (required for send)
-        let snap = td.path.join("snap");
-        create_snapshot(&src, &snap).unwrap();
-
-        let dest = td_recv.path.join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-
-        let stats = send_and_receive_piped(&snap, None, &dest).unwrap();
-        assert!(stats.bytes > 0);
-
-        // The received subvolume keeps the snapshot name
-        let received = dest.join("snap");
-        assert!(is_subvolume(&received).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(received.join("data.txt")).unwrap(),
-            "payload"
-        );
-    }
-
-    #[test]
-    fn test_btrfs_send_and_receive_incremental() {
-        let td = require_btrfs_test_dir!("send_recv_incr");
-        let td_recv = require_btrfs_recv_dir!("send_recv_incr");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "file1.txt", "first");
-
-        let snap1 = td.path.join("snap1");
-        create_snapshot(&src, &snap1).unwrap();
-
-        let dest = td_recv.path.join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-
-        // Full send of snap1
-        send_and_receive_piped(&snap1, None, &dest).unwrap();
-
-        // Add more data
-        write_test_file(&src, "file2.txt", "second");
-        let snap2 = td.path.join("snap2");
-        create_snapshot(&src, &snap2).unwrap();
-
-        // Incremental send of snap2 with snap1 as parent
-        let stats = send_and_receive_piped(&snap2, Some(&snap1), &dest).unwrap();
-        assert!(stats.bytes > 0);
-
-        let received = dest.join("snap2");
-        assert!(is_subvolume(&received).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(received.join("file1.txt")).unwrap(),
-            "first"
-        );
-        assert_eq!(
-            std::fs::read_to_string(received.join("file2.txt")).unwrap(),
-            "second"
-        );
-    }
-
-    #[test]
-    fn test_btrfs_send_and_receive_piped_injected_send_failure() {
-        let td = require_btrfs_test_dir!("send_recv_send_fail");
-        let td_recv = require_btrfs_recv_dir!("send_recv_send_fail");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "data.txt", "payload");
-
-        let snap = td.path.join("snap");
-        create_snapshot(&src, &snap).unwrap();
-
-        let dest = td_recv.path.join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-
-        let _runner = scoped_hook_command_runner(HookCommandRunner::new().with_spawn_hook(|cmd| {
-            let args = crate::test_util::command_args(cmd);
-            if crate::test_util::command_program(cmd) == "btrfs"
-                && args.first().map(String::as_str) == Some("send")
-            {
-                let mut fail = std::process::Command::new("sh");
-                fail.arg("-c")
-                    .arg("echo \"injected send failure\" >&2; exit 29")
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped());
-                return Some(fail.spawn());
+    mod root_required_tests {
+        use super::*;
+        use crate::test_util::{
+            HookCommandRunner, find_executable_in_path, require_btrfs_recv_dir,
+            require_btrfs_test_dir, scoped_hook_command_runner, write_test_file,
+        };
+        use std::process::Command;
+
+        fn ensure_root_for_root_required_tests() -> bool {
+            let output = match Command::new("id").arg("-u").output() {
+                Ok(output) => output,
+                Err(_) => {
+                    eprintln!("Skipped: failed to determine current uid");
+                    return false;
+                }
+            };
+
+            if !output.status.success() {
+                eprintln!("Skipped: failed to determine current uid");
+                return false;
             }
-            None
-        }));
 
-        let result = send_and_receive_piped(&snap, None, &dest);
-        assert!(result.is_err());
-        let msg = format!("{}", result.err().unwrap());
-        assert!(msg.contains("Failed to send subvolume"));
-        assert!(!dest.join("snap").exists());
-    }
-
-    #[test]
-    fn test_btrfs_send_and_receive_piped_injected_receive_failure() {
-        let td = require_btrfs_test_dir!("send_recv_recv_fail");
-        let td_recv = require_btrfs_recv_dir!("send_recv_recv_fail");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "data.txt", "payload");
-
-        let snap = td.path.join("snap");
-        create_snapshot(&src, &snap).unwrap();
-
-        let dest = td_recv.path.join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-
-        let _runner = scoped_hook_command_runner(HookCommandRunner::new().with_spawn_hook(|cmd| {
-            let args = crate::test_util::command_args(cmd);
-            if crate::test_util::command_program(cmd) == "btrfs"
-                && args.first().map(String::as_str) == Some("receive")
-            {
-                let mut fail = std::process::Command::new("sh");
-                fail.arg("-c")
-                    .arg("cat >/dev/null; echo \"injected receive failure\" >&2; exit 31")
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::piped());
-                return Some(fail.spawn());
+            if String::from_utf8_lossy(&output.stdout).trim() == "0" {
+                true
+            } else {
+                eprintln!("Skipped: root_required_tests require root");
+                false
             }
-            None
-        }));
+        }
 
-        let result = send_and_receive_piped(&snap, None, &dest);
-        assert!(result.is_err());
-        let msg = format!("{}", result.err().unwrap());
-        assert!(msg.contains("Failed to receive subvolume"));
-        assert!(!dest.join("snap").exists());
-    }
-
-    // --- Atomic replace operations ---
-
-    #[test]
-    fn test_btrfs_send_and_replace_safely_new() {
-        let td = require_btrfs_test_dir!("send_replace_new");
-        let td_recv = require_btrfs_recv_dir!("send_replace_new");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "f.txt", "content");
-
-        let snap = td.path.join("snap");
-        create_snapshot(&src, &snap).unwrap();
-
-        let dest = td_recv.path.join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-
-        let stats = send_and_replace_safely(&snap, None, &dest, "old", Some("target")).unwrap();
-        assert!(stats.bytes > 0);
-
-        let target = dest.join("target");
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target.join("f.txt")).unwrap(),
-            "content"
-        );
-    }
-
-    #[test]
-    fn test_btrfs_send_and_replace_safely_existing() {
-        let td = require_btrfs_test_dir!("send_replace_exist");
-        let td_recv = require_btrfs_recv_dir!("send_replace_exist");
-
-        // Create initial target via send
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "v1.txt", "v1");
-
-        let snap1 = td.path.join("snap1");
-        create_snapshot(&src, &snap1).unwrap();
-
-        let dest = td_recv.path.join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-
-        send_and_replace_safely(&snap1, None, &dest, "old", Some("target")).unwrap();
-
-        // Now update and replace
-        write_test_file(&src, "v2.txt", "v2");
-        let snap2 = td.path.join("snap2");
-        create_snapshot(&src, &snap2).unwrap();
-
-        send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target")).unwrap();
-
-        let target = dest.join("target");
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target.join("v2.txt")).unwrap(),
-            "v2"
-        );
-
-        // No .old residue
-        assert!(!dest.join("target.old").exists());
-    }
-
-    #[test]
-    fn test_btrfs_send_and_replace_safely_preserves_received_conflict_subvolume() {
-        let td = require_btrfs_test_dir!("send_replace_conflict");
-        let td_recv = require_btrfs_recv_dir!("send_replace_conflict");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "fresh.txt", "new-data");
-
-        let snap = td.path.join("incoming");
-        create_snapshot(&src, &snap).unwrap();
-
-        let dest = td_recv.path.join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-
-        // Create an existing subvolume at the receive name to force
-        // .conflict rename + restore behavior.
-        let existing_received = dest.join("incoming");
-        create_subvolume(&existing_received).unwrap();
-        write_test_file(&existing_received, "keep.txt", "keep-me");
-
-        send_and_replace_safely(&snap, None, &dest, "old", Some("target")).unwrap();
-
-        let target = dest.join("target");
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target.join("fresh.txt")).unwrap(),
-            "new-data"
-        );
-
-        // Existing received-name subvolume must be restored untouched.
-        assert!(is_subvolume(&existing_received).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(existing_received.join("keep.txt")).unwrap(),
-            "keep-me"
-        );
-        assert!(!dest.join("incoming.conflict").exists());
-    }
-
-    #[test]
-    fn test_btrfs_send_and_replace_safely_receive_post_failure_restores_target_state() {
-        let td = require_btrfs_test_dir!("send_replace_restore_target");
-        let td_recv = require_btrfs_recv_dir!("send_replace_restore_target");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "fresh.txt", "new-data");
-
-        // Use "target" so receive path equals target path (needs_rename = false).
-        let snap = td.path.join("target");
-        create_snapshot(&src, &snap).unwrap();
-
-        let dest = td_recv.path.join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-
-        let target = dest.join("target");
-        create_subvolume(&target).unwrap();
-        write_test_file(&target, "old.txt", "old-data");
-        let old_target_id = get_subvolume_id(&target).unwrap();
-
-        let real_btrfs = match find_executable_in_path("btrfs") {
-            Some(path) => path,
-            None => {
-                crate::test_util::skip_or_fail_test("Skipped: btrfs command not found in PATH");
+        #[test]
+        fn test_btrfs_send_and_receive_piped() {
+            if !ensure_root_for_root_required_tests() {
                 return;
             }
-        };
-        let real_btrfs_s = real_btrfs.display().to_string();
-        let dest_s = dest.display().to_string();
 
-        // Force receive to run and then fail, simulating partial-success failure.
-        let _runner = scoped_hook_command_runner(
-            HookCommandRunner::new().with_spawn_hook(move |cmd| {
-                let args = crate::test_util::command_args(cmd);
-                if crate::test_util::command_program(cmd) == "btrfs"
-                    && args.first().map(String::as_str) == Some("receive")
-                    && args.get(1).map(String::as_str) == Some(dest_s.as_str())
-                {
-                    let mut wrapped = std::process::Command::new("sh");
-                    wrapped
-                        .arg("-c")
-                        .arg("b=\"$1\"; d=\"$2\"; \"$b\" receive \"$d\"; st=$?; if [ $st -ne 0 ]; then exit $st; fi; echo \"injected post-receive failure\" >&2; exit 71")
-                        .arg("sh")
-                        .arg(&real_btrfs_s)
-                        .arg(&dest_s)
-                        .stdin(std::process::Stdio::piped())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::piped());
-                    return Some(wrapped.spawn());
-                }
-                None
-            }),
-        );
+            let td = require_btrfs_test_dir!("send_recv_piped");
+            let td_recv = require_btrfs_recv_dir!("send_recv_piped");
 
-        let result = send_and_replace_safely(&snap, None, &dest, "old", Some("target"));
-        assert!(result.is_err());
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "data.txt", "payload");
 
-        // Old target must be restored in-place with no residue.
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(get_subvolume_id(&target).unwrap(), old_target_id);
-        assert_eq!(
-            std::fs::read_to_string(target.join("old.txt")).unwrap(),
-            "old-data"
-        );
-        assert!(!dest.join("target.old").exists());
-    }
+            // Create read-only snapshot (required for send)
+            let snap = td.path.join("snap");
+            create_snapshot(&src, &snap).unwrap();
 
-    #[test]
-    fn test_btrfs_send_and_replace_safely_receive_post_failure_restores_target_and_conflict() {
-        let td = require_btrfs_test_dir!("send_replace_restore_conflict");
-        let td_recv = require_btrfs_recv_dir!("send_replace_restore_conflict");
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
 
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "fresh.txt", "new-data");
+            let stats = send_and_receive_piped(&snap, None, &dest).unwrap();
+            assert!(stats.bytes > 0);
 
-        let snap = td.path.join("incoming");
-        create_snapshot(&src, &snap).unwrap();
+            // The received subvolume keeps the snapshot name
+            let received = dest.join("snap");
+            assert!(is_subvolume(&received).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(received.join("data.txt")).unwrap(),
+                "payload"
+            );
+        }
 
-        let dest = td_recv.path.join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-
-        let target = dest.join("target");
-        create_subvolume(&target).unwrap();
-        write_test_file(&target, "target-old.txt", "target-old");
-        let target_old_id = get_subvolume_id(&target).unwrap();
-
-        let existing_received = dest.join("incoming");
-        create_subvolume(&existing_received).unwrap();
-        write_test_file(&existing_received, "keep.txt", "keep-me");
-        let received_old_id = get_subvolume_id(&existing_received).unwrap();
-
-        let real_btrfs = match find_executable_in_path("btrfs") {
-            Some(path) => path,
-            None => {
-                crate::test_util::skip_or_fail_test("Skipped: btrfs command not found in PATH");
+        #[test]
+        fn test_btrfs_send_and_receive_incremental() {
+            if !ensure_root_for_root_required_tests() {
                 return;
             }
-        };
-        let real_btrfs_s = real_btrfs.display().to_string();
-        let dest_s = dest.display().to_string();
 
-        let _runner = scoped_hook_command_runner(
-            HookCommandRunner::new().with_spawn_hook(move |cmd| {
-                let args = crate::test_util::command_args(cmd);
-                if crate::test_util::command_program(cmd) == "btrfs"
-                    && args.first().map(String::as_str) == Some("receive")
-                    && args.get(1).map(String::as_str) == Some(dest_s.as_str())
-                {
-                    let mut wrapped = std::process::Command::new("sh");
-                    wrapped
-                        .arg("-c")
-                        .arg("b=\"$1\"; d=\"$2\"; \"$b\" receive \"$d\"; st=$?; if [ $st -ne 0 ]; then exit $st; fi; echo \"injected post-receive failure\" >&2; exit 72")
-                        .arg("sh")
-                        .arg(&real_btrfs_s)
-                        .arg(&dest_s)
-                        .stdin(std::process::Stdio::piped())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::piped());
-                    return Some(wrapped.spawn());
+            let td = require_btrfs_test_dir!("send_recv_incr");
+            let td_recv = require_btrfs_recv_dir!("send_recv_incr");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "file1.txt", "first");
+
+            let snap1 = td.path.join("snap1");
+            create_snapshot(&src, &snap1).unwrap();
+
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
+
+            // Full send of snap1
+            send_and_receive_piped(&snap1, None, &dest).unwrap();
+
+            // Add more data
+            write_test_file(&src, "file2.txt", "second");
+            let snap2 = td.path.join("snap2");
+            create_snapshot(&src, &snap2).unwrap();
+
+            // Incremental send of snap2 with snap1 as parent
+            let stats = send_and_receive_piped(&snap2, Some(&snap1), &dest).unwrap();
+            assert!(stats.bytes > 0);
+
+            let received = dest.join("snap2");
+            assert!(is_subvolume(&received).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(received.join("file1.txt")).unwrap(),
+                "first"
+            );
+            assert_eq!(
+                std::fs::read_to_string(received.join("file2.txt")).unwrap(),
+                "second"
+            );
+        }
+
+        #[test]
+        fn test_btrfs_send_and_receive_piped_injected_send_failure() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
+
+            let td = require_btrfs_test_dir!("send_recv_send_fail");
+            let td_recv = require_btrfs_recv_dir!("send_recv_send_fail");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "data.txt", "payload");
+
+            let snap = td.path.join("snap");
+            create_snapshot(&src, &snap).unwrap();
+
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
+
+            let _runner =
+                scoped_hook_command_runner(HookCommandRunner::new().with_spawn_hook(|cmd| {
+                    let args = crate::test_util::command_args(cmd);
+                    if crate::test_util::command_program(cmd) == "btrfs"
+                        && args.first().map(String::as_str) == Some("send")
+                    {
+                        let mut fail = std::process::Command::new("sh");
+                        fail.arg("-c")
+                            .arg("echo \"injected send failure\" >&2; exit 29")
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped());
+                        return Some(fail.spawn());
+                    }
+                    None
+                }));
+
+            let result = send_and_receive_piped(&snap, None, &dest);
+            assert!(result.is_err());
+            let msg = format!("{}", result.err().unwrap());
+            assert!(msg.contains("Failed to send subvolume"));
+            assert!(!dest.join("snap").exists());
+        }
+
+        #[test]
+        fn test_btrfs_send_and_receive_piped_injected_receive_failure() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
+
+            let td = require_btrfs_test_dir!("send_recv_recv_fail");
+            let td_recv = require_btrfs_recv_dir!("send_recv_recv_fail");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "data.txt", "payload");
+
+            let snap = td.path.join("snap");
+            create_snapshot(&src, &snap).unwrap();
+
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
+
+            let _runner =
+                scoped_hook_command_runner(HookCommandRunner::new().with_spawn_hook(|cmd| {
+                    let args = crate::test_util::command_args(cmd);
+                    if crate::test_util::command_program(cmd) == "btrfs"
+                        && args.first().map(String::as_str) == Some("receive")
+                    {
+                        let mut fail = std::process::Command::new("sh");
+                        fail.arg("-c")
+                            .arg("cat >/dev/null; echo \"injected receive failure\" >&2; exit 31")
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::piped());
+                        return Some(fail.spawn());
+                    }
+                    None
+                }));
+
+            let result = send_and_receive_piped(&snap, None, &dest);
+            assert!(result.is_err());
+            let msg = format!("{}", result.err().unwrap());
+            assert!(msg.contains("Failed to receive subvolume"));
+            assert!(!dest.join("snap").exists());
+        }
+
+        #[test]
+        fn test_btrfs_send_and_replace_safely_new() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
+
+            let td = require_btrfs_test_dir!("send_replace_new");
+            let td_recv = require_btrfs_recv_dir!("send_replace_new");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "f.txt", "content");
+
+            let snap = td.path.join("snap");
+            create_snapshot(&src, &snap).unwrap();
+
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
+
+            let stats = send_and_replace_safely(&snap, None, &dest, "old", Some("target")).unwrap();
+            assert!(stats.bytes > 0);
+
+            let target = dest.join("target");
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("f.txt")).unwrap(),
+                "content"
+            );
+        }
+
+        #[test]
+        fn test_btrfs_send_and_replace_safely_existing() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
+
+            let td = require_btrfs_test_dir!("send_replace_exist");
+            let td_recv = require_btrfs_recv_dir!("send_replace_exist");
+
+            // Create initial target via send
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "v1.txt", "v1");
+
+            let snap1 = td.path.join("snap1");
+            create_snapshot(&src, &snap1).unwrap();
+
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
+
+            send_and_replace_safely(&snap1, None, &dest, "old", Some("target")).unwrap();
+
+            // Now update and replace
+            write_test_file(&src, "v2.txt", "v2");
+            let snap2 = td.path.join("snap2");
+            create_snapshot(&src, &snap2).unwrap();
+
+            send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target")).unwrap();
+
+            let target = dest.join("target");
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("v2.txt")).unwrap(),
+                "v2"
+            );
+
+            // No .old residue
+            assert!(!dest.join("target.old").exists());
+        }
+
+        #[test]
+        fn test_btrfs_send_and_replace_safely_preserves_received_conflict_subvolume() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
+
+            let td = require_btrfs_test_dir!("send_replace_conflict");
+            let td_recv = require_btrfs_recv_dir!("send_replace_conflict");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "fresh.txt", "new-data");
+
+            let snap = td.path.join("incoming");
+            create_snapshot(&src, &snap).unwrap();
+
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
+
+            // Create an existing subvolume at the receive name to force
+            // .conflict rename + restore behavior.
+            let existing_received = dest.join("incoming");
+            create_subvolume(&existing_received).unwrap();
+            write_test_file(&existing_received, "keep.txt", "keep-me");
+
+            send_and_replace_safely(&snap, None, &dest, "old", Some("target")).unwrap();
+
+            let target = dest.join("target");
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("fresh.txt")).unwrap(),
+                "new-data"
+            );
+
+            // Existing received-name subvolume must be restored untouched.
+            assert!(is_subvolume(&existing_received).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(existing_received.join("keep.txt")).unwrap(),
+                "keep-me"
+            );
+            assert!(!dest.join("incoming.conflict").exists());
+        }
+
+        #[test]
+        fn test_btrfs_send_and_replace_safely_receive_post_failure_restores_target_state() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
+
+            let td = require_btrfs_test_dir!("send_replace_restore_target");
+            let td_recv = require_btrfs_recv_dir!("send_replace_restore_target");
+
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "fresh.txt", "new-data");
+
+            // Use "target" so receive path equals target path (needs_rename = false).
+            let snap = td.path.join("target");
+            create_snapshot(&src, &snap).unwrap();
+
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
+
+            let target = dest.join("target");
+            create_subvolume(&target).unwrap();
+            write_test_file(&target, "old.txt", "old-data");
+            let old_target_id = get_subvolume_id(&target).unwrap();
+
+            let real_btrfs = match find_executable_in_path("btrfs") {
+                Some(path) => path,
+                None => {
+                    crate::test_util::skip_or_fail_test("Skipped: btrfs command not found in PATH");
+                    return;
                 }
-                None
-            }),
-        );
+            };
+            let real_btrfs_s = real_btrfs.display().to_string();
+            let dest_s = dest.display().to_string();
 
-        let result = send_and_replace_safely(&snap, None, &dest, "old", Some("target"));
-        assert!(result.is_err());
+            // Force receive to run and then fail, simulating partial-success failure.
+            let _runner = scoped_hook_command_runner(
+                HookCommandRunner::new().with_spawn_hook(move |cmd| {
+                    let args = crate::test_util::command_args(cmd);
+                    if crate::test_util::command_program(cmd) == "btrfs"
+                        && args.first().map(String::as_str) == Some("receive")
+                        && args.get(1).map(String::as_str) == Some(dest_s.as_str())
+                    {
+                        let mut wrapped = std::process::Command::new("sh");
+                        wrapped
+                            .arg("-c")
+                            .arg("b=\"$1\"; d=\"$2\"; \"$b\" receive \"$d\"; st=$?; if [ $st -ne 0 ]; then exit $st; fi; echo \"injected post-receive failure\" >&2; exit 71")
+                            .arg("sh")
+                            .arg(&real_btrfs_s)
+                            .arg(&dest_s)
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::piped());
+                        return Some(wrapped.spawn());
+                    }
+                    None
+                }),
+            );
 
-        // Both renamed originals must be restored, and temp backups removed.
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(get_subvolume_id(&target).unwrap(), target_old_id);
-        assert_eq!(
-            std::fs::read_to_string(target.join("target-old.txt")).unwrap(),
-            "target-old"
-        );
+            let result = send_and_replace_safely(&snap, None, &dest, "old", Some("target"));
+            assert!(result.is_err());
 
-        assert!(is_subvolume(&existing_received).unwrap());
-        assert_eq!(
-            get_subvolume_id(&existing_received).unwrap(),
-            received_old_id
-        );
-        assert_eq!(
-            std::fs::read_to_string(existing_received.join("keep.txt")).unwrap(),
-            "keep-me"
-        );
+            // Old target must be restored in-place with no residue.
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(get_subvolume_id(&target).unwrap(), old_target_id);
+            assert_eq!(
+                std::fs::read_to_string(target.join("old.txt")).unwrap(),
+                "old-data"
+            );
+            assert!(!dest.join("target.old").exists());
+        }
 
-        assert!(!dest.join("target.old").exists());
-        assert!(!dest.join("incoming.conflict").exists());
-    }
+        #[test]
+        fn test_btrfs_send_and_replace_safely_receive_post_failure_restores_target_and_conflict() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
 
-    #[test]
-    fn test_btrfs_snapshot_and_replace_safely() {
-        let td = require_btrfs_test_dir!("snap_replace");
+            let td = require_btrfs_test_dir!("send_replace_restore_conflict");
+            let td_recv = require_btrfs_recv_dir!("send_replace_restore_conflict");
 
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "data.txt", "hello");
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "fresh.txt", "new-data");
 
-        let snap = td.path.join("snap");
-        create_snapshot(&src, &snap).unwrap();
+            let snap = td.path.join("incoming");
+            create_snapshot(&src, &snap).unwrap();
 
-        let target = td.path.join("target");
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
 
-        snapshot_and_replace_safely(&target, &snap, "old").unwrap();
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target.join("data.txt")).unwrap(),
-            "hello"
-        );
+            let target = dest.join("target");
+            create_subvolume(&target).unwrap();
+            write_test_file(&target, "target-old.txt", "target-old");
+            let target_old_id = get_subvolume_id(&target).unwrap();
 
-        // Replace again to exercise existing-target path
-        write_test_file(&src, "data2.txt", "world");
-        let snap2 = td.path.join("snap2");
-        create_snapshot(&src, &snap2).unwrap();
+            let existing_received = dest.join("incoming");
+            create_subvolume(&existing_received).unwrap();
+            write_test_file(&existing_received, "keep.txt", "keep-me");
+            let received_old_id = get_subvolume_id(&existing_received).unwrap();
 
-        snapshot_and_replace_safely(&target, &snap2, "old").unwrap();
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target.join("data2.txt")).unwrap(),
-            "world"
-        );
-        assert!(!td.path.join("target.old").exists());
-    }
-
-    #[test]
-    fn test_btrfs_snapshot_and_replace_safely_rejects_non_subvolume_target_and_cleans_temp() {
-        let td = require_btrfs_test_dir!("snap_replace_plain_target");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "data.txt", "hello");
-
-        let snap = td.path.join("snap");
-        create_snapshot(&src, &snap).unwrap();
-
-        // Existing plain directory target: should fail safely.
-        let target = td.path.join("target");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(target.join("marker.txt"), "keep").unwrap();
-
-        let err = snapshot_and_replace_safely(&target, &snap, "old");
-        assert!(err.is_err());
-
-        // Original directory remains in place and unchanged.
-        assert!(target.is_dir());
-        assert_eq!(
-            std::fs::read_to_string(target.join("marker.txt")).unwrap(),
-            "keep"
-        );
-
-        // Temporary and backup paths should not be left behind.
-        assert!(!td.path.join("target.new").exists());
-        assert!(!td.path.join("target.old").exists());
-    }
-
-    #[test]
-    fn test_btrfs_snapshot_and_replace_safely_delete_backup_failure_keeps_recoverable_state() {
-        let td = require_btrfs_test_dir!("snap_replace_delete_fail");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "v1.txt", "v1");
-
-        let snap1 = td.path.join("snap1");
-        create_snapshot(&src, &snap1).unwrap();
-
-        let target = td.path.join("target");
-        snapshot_and_replace_safely(&target, &snap1, "old").unwrap();
-
-        write_test_file(&src, "v2.txt", "v2");
-        let snap2 = td.path.join("snap2");
-        create_snapshot(&src, &snap2).unwrap();
-
-        let target_old = td.path.join("target.old");
-        let target_old_s = target_old.display().to_string();
-
-        let _runner =
-            scoped_hook_command_runner(HookCommandRunner::new().with_output_hook(move |cmd| {
-                let args = crate::test_util::command_args(cmd);
-                if crate::test_util::command_program(cmd) == "btrfs"
-                    && args.as_slice()
-                        == &[
-                            "subvolume".to_string(),
-                            "delete".to_string(),
-                            target_old_s.clone(),
-                        ]
-                {
-                    return Some(Ok(crate::test_util::mock_output(
-                        73,
-                        "",
-                        "injected delete failure\n",
-                    )));
+            let real_btrfs = match find_executable_in_path("btrfs") {
+                Some(path) => path,
+                None => {
+                    crate::test_util::skip_or_fail_test("Skipped: btrfs command not found in PATH");
+                    return;
                 }
-                None
-            }));
+            };
+            let real_btrfs_s = real_btrfs.display().to_string();
+            let dest_s = dest.display().to_string();
 
-        let result = snapshot_and_replace_safely(&target, &snap2, "old");
-        assert!(result.is_err());
+            let _runner = scoped_hook_command_runner(
+                HookCommandRunner::new().with_spawn_hook(move |cmd| {
+                    let args = crate::test_util::command_args(cmd);
+                    if crate::test_util::command_program(cmd) == "btrfs"
+                        && args.first().map(String::as_str) == Some("receive")
+                        && args.get(1).map(String::as_str) == Some(dest_s.as_str())
+                    {
+                        let mut wrapped = std::process::Command::new("sh");
+                        wrapped
+                            .arg("-c")
+                            .arg("b=\"$1\"; d=\"$2\"; \"$b\" receive \"$d\"; st=$?; if [ $st -ne 0 ]; then exit $st; fi; echo \"injected post-receive failure\" >&2; exit 72")
+                            .arg("sh")
+                            .arg(&real_btrfs_s)
+                            .arg(&dest_s)
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::piped());
+                        return Some(wrapped.spawn());
+                    }
+                    None
+                }),
+            );
 
-        // New target is in place, old target remains as backup, and no .new residue.
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target.join("v2.txt")).unwrap(),
-            "v2"
-        );
+            let result = send_and_replace_safely(&snap, None, &dest, "old", Some("target"));
+            assert!(result.is_err());
 
-        assert!(is_subvolume(&target_old).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target_old.join("v1.txt")).unwrap(),
-            "v1"
-        );
+            // Both renamed originals must be restored, and temp backups removed.
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(get_subvolume_id(&target).unwrap(), target_old_id);
+            assert_eq!(
+                std::fs::read_to_string(target.join("target-old.txt")).unwrap(),
+                "target-old"
+            );
 
-        assert!(!td.path.join("target.new").exists());
-    }
+            assert!(is_subvolume(&existing_received).unwrap());
+            assert_eq!(
+                get_subvolume_id(&existing_received).unwrap(),
+                received_old_id
+            );
+            assert_eq!(
+                std::fs::read_to_string(existing_received.join("keep.txt")).unwrap(),
+                "keep-me"
+            );
 
-    #[test]
-    fn test_btrfs_move_and_replace_safely() {
-        let td = require_btrfs_test_dir!("move_replace");
-
-        let src = td.path.join("src");
-        create_subvolume(&src).unwrap();
-        write_test_file(&src, "orig.txt", "orig");
-
-        // Create initial target
-        let target = td.path.join("target");
-        create_subvolume(&target).unwrap();
-        write_test_file(&target, "old.txt", "old");
-
-        // Create new subvolume to replace target with
-        let new_sv = td.path.join("new_sv");
-        create_subvolume(&new_sv).unwrap();
-        write_test_file(&new_sv, "new.txt", "new");
-
-        move_and_replace_safely(&target, &new_sv, "old").unwrap();
-
-        assert!(!new_sv.exists());
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target.join("new.txt")).unwrap(),
-            "new"
-        );
-        assert!(!td.path.join("target.old").exists());
-    }
-
-    #[test]
-    fn test_btrfs_move_and_replace_safely_no_target() {
-        let td = require_btrfs_test_dir!("move_replace_notarget");
-
-        let target = td.path.join("target");
-        let new_sv = td.path.join("new_sv");
-        create_subvolume(&new_sv).unwrap();
-        write_test_file(&new_sv, "file.txt", "data");
-
-        move_and_replace_safely(&target, &new_sv, "old").unwrap();
-
-        assert!(!new_sv.exists());
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target.join("file.txt")).unwrap(),
-            "data"
-        );
-    }
-
-    #[test]
-    fn test_btrfs_move_and_replace_safely_rolls_back_source_on_invalid_target() {
-        let td = require_btrfs_test_dir!("move_replace_plain_target");
-
-        // Existing plain directory target causes rename_subvolume(target, target.old)
-        // to fail validation and should trigger rollback.
-        let target = td.path.join("target");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(target.join("marker.txt"), "keep").unwrap();
-
-        let source = td.path.join("source_sv");
-        create_subvolume(&source).unwrap();
-        write_test_file(&source, "payload.txt", "payload");
-
-        let err = move_and_replace_safely(&target, &source, "old");
-        assert!(err.is_err());
-
-        // Source subvolume must be restored to original location.
-        assert!(is_subvolume(&source).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(source.join("payload.txt")).unwrap(),
-            "payload"
-        );
-
-        // Target directory stays intact.
-        assert!(target.is_dir());
-        assert_eq!(
-            std::fs::read_to_string(target.join("marker.txt")).unwrap(),
-            "keep"
-        );
-
-        assert!(!td.path.join("target.new").exists());
-        assert!(!td.path.join("target.old").exists());
-    }
-
-    #[test]
-    fn test_btrfs_move_and_replace_safely_delete_backup_failure_keeps_recoverable_state() {
-        let td = require_btrfs_test_dir!("move_replace_delete_fail");
-
-        let target = td.path.join("target");
-        create_subvolume(&target).unwrap();
-        write_test_file(&target, "old.txt", "old");
-
-        let source = td.path.join("source_sv");
-        create_subvolume(&source).unwrap();
-        write_test_file(&source, "new.txt", "new");
-
-        let target_old = td.path.join("target.old");
-        let target_old_s = target_old.display().to_string();
-
-        let _runner =
-            scoped_hook_command_runner(HookCommandRunner::new().with_output_hook(move |cmd| {
-                let args = crate::test_util::command_args(cmd);
-                if crate::test_util::command_program(cmd) == "btrfs"
-                    && args.as_slice()
-                        == &[
-                            "subvolume".to_string(),
-                            "delete".to_string(),
-                            target_old_s.clone(),
-                        ]
-                {
-                    return Some(Ok(crate::test_util::mock_output(
-                        74,
-                        "",
-                        "injected delete failure\n",
-                    )));
-                }
-                None
-            }));
-
-        let result = move_and_replace_safely(&target, &source, "old");
-        assert!(result.is_err());
-
-        // New target remains, source moved, old backup retained for recovery.
-        assert!(is_subvolume(&target).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target.join("new.txt")).unwrap(),
-            "new"
-        );
-        assert!(!source.exists());
-
-        assert!(is_subvolume(&target_old).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(target_old.join("old.txt")).unwrap(),
-            "old"
-        );
-        assert!(!td.path.join("target.new").exists());
+            assert!(!dest.join("target.old").exists());
+            assert!(!dest.join("incoming.conflict").exists());
+        }
     }
 }

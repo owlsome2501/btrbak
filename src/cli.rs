@@ -28,10 +28,6 @@ pub enum Commands {
         /// Dry run: show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
-
-        /// Use privileged system tools (`cryptsetup`, `mount`, `umount`) instead of user-space tools
-        #[arg(long)]
-        privileged_mode: bool,
     },
 
     /// Prepare live boot environment (initialize subvolumes and bootloader)
@@ -39,10 +35,6 @@ pub enum Commands {
         /// Path to configuration file (TOML)
         #[arg(short, long, default_value = "btrbak.toml")]
         config: PathBuf,
-
-        /// Use privileged system tools (`cryptsetup`, `mount`, `umount`) instead of user-space tools
-        #[arg(long)]
-        privileged_mode: bool,
     },
 
     /// Validate configuration file
@@ -59,41 +51,32 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn test_backup_privileged_mode_default_false() {
+    fn test_backup_accepts_default_flags() {
         let cli = Cli::parse_from(["btrbak", "backup"]);
         match cli.command {
-            Commands::Backup {
-                privileged_mode, ..
-            } => {
-                assert!(!privileged_mode);
-            }
+            Commands::Backup { .. } => {}
             _ => panic!("expected backup command"),
         }
     }
 
     #[test]
-    fn test_backup_privileged_mode_true_when_set() {
-        let cli = Cli::parse_from(["btrbak", "backup", "--privileged-mode"]);
-        match cli.command {
-            Commands::Backup {
-                privileged_mode, ..
-            } => {
-                assert!(privileged_mode);
-            }
-            _ => panic!("expected backup command"),
-        }
+    fn test_backup_rejects_removed_privileged_mode_flag() {
+        let cli = Cli::try_parse_from(["btrbak", "backup", "--privileged-mode"]);
+        assert!(cli.is_err());
     }
 
     #[test]
-    fn test_prepare_live_privileged_mode_true_when_set() {
-        let cli = Cli::parse_from(["btrbak", "prepare-live", "--privileged-mode"]);
+    fn test_prepare_live_accepts_default_flags() {
+        let cli = Cli::parse_from(["btrbak", "prepare-live"]);
         match cli.command {
-            Commands::PrepareLive {
-                privileged_mode, ..
-            } => {
-                assert!(privileged_mode);
-            }
+            Commands::PrepareLive { .. } => {}
             _ => panic!("expected prepare-live command"),
         }
+    }
+
+    #[test]
+    fn test_prepare_live_rejects_removed_privileged_mode_flag() {
+        let cli = Cli::try_parse_from(["btrbak", "prepare-live", "--privileged-mode"]);
+        assert!(cli.is_err());
     }
 }

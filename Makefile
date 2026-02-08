@@ -1,4 +1,4 @@
-.PHONY: build release check clippy fmt fmt-check test test-unit test-integration clean install
+.PHONY: build release check clippy fmt fmt-check test test-unit test-no-root test-root-required test-prepare-root-env test-cleanup-root-env test-integration clean install
 
 build:
 	cargo build
@@ -18,13 +18,24 @@ fmt:
 fmt-check:
 	cargo fmt -- --check
 
-test: test-unit
+test: test-no-root
 
-test-unit:
-	cargo test
+test-unit: test-no-root
+
+test-no-root:
+	./scripts/test-no-root.sh
 
 test-integration:
-	bash scripts/test-integration.sh
+	cargo test --test backup_workflow_integration
+
+test-root-required:
+	./scripts/test-root-required.sh
+
+test-prepare-root-env:
+	./scripts/prepare-root-test-env.sh
+
+test-cleanup-root-env:
+	./scripts/cleanup-root-test-env.sh
 
 clean:
 	cargo clean

@@ -7,18 +7,11 @@ fn run() -> Result<(), BackupError> {
     ui::init(cli.verbose, cli.quiet);
 
     match cli.command {
-        btrbak::cli::Commands::Backup {
-            config,
-            dry_run,
-            privileged_mode,
-        } => {
-            backup::run_backup(&config, dry_run, privileged_mode)?;
+        btrbak::cli::Commands::Backup { config, dry_run } => {
+            backup::run_backup(&config, dry_run)?;
         }
-        btrbak::cli::Commands::PrepareLive {
-            config,
-            privileged_mode,
-        } => {
-            backup::prepare_live_environment(&config, privileged_mode)?;
+        btrbak::cli::Commands::PrepareLive { config } => {
+            backup::prepare_live_environment(&config)?;
         }
         btrbak::cli::Commands::Validate { config } => {
             let config = Config::from_file(&config)?;

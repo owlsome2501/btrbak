@@ -465,10 +465,7 @@ fn print_summary(results: &[(PathBuf, Option<btrfs::TransferStats>)], start: &In
 
 /// Mount target device if needed.
 /// Returns a MountGuard that will unmount the device when dropped.
-fn mount_target(
-    config: &Config,
-    mode: device::DeviceAccessMode,
-) -> Result<device::MountGuard, BackupError> {
+fn mount_target(config: &Config) -> Result<device::MountGuard, BackupError> {
     match &config.target.location {
         TargetLocation::MountedPath(path) => {
             if !path.exists() {
@@ -481,9 +478,9 @@ fn mount_target(
         }
         TargetLocation::Device(device) => {
             if let Some(encryption) = &config.target.encryption {
-                device::MountGuard::new_encrypted_with_mode(device, encryption, mode)
+                device::MountGuard::new_encrypted(device, encryption)
             } else {
-                device::MountGuard::new_with_mode(device, mode)
+                device::MountGuard::new(device)
             }
         }
     }
@@ -592,14 +589,9 @@ fn backup_single_source(
 }
 
 /// Main backup procedure.
-pub fn run_backup(
-    config_path: &Path,
-    dry_run: bool,
-    privileged_mode: bool,
-) -> Result<(), BackupError> {
+pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> {
     let config = Config::from_file(config_path)?;
     config.validate()?;
-    let device_mode = device::DeviceAccessMode::from_privileged_flag(privileged_mode);
 
     let _lock = ConfigLock::acquire(&config.name)?;
 
@@ -621,7 +613,7 @@ pub fn run_backup(
 
     current_step += 1;
     ui::step(current_step, total_steps, "Mounting target");
-    let mount_guard = mount_target(&config, device_mode)?;
+    let mount_guard = mount_target(&config)?;
     let target_mount = mount_guard.mount_point();
     ui::success("Target mounted");
 
@@ -686,13 +678,9 @@ pub fn run_backup(
 }
 
 /// Prepare live boot environment (initial setup).
-pub fn prepare_live_environment(
-    config_path: &Path,
-    privileged_mode: bool,
-) -> Result<(), BackupError> {
+pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
     let config = Config::from_file(config_path)?;
     config.validate()?;
-    let device_mode = device::DeviceAccessMode::from_privileged_flag(privileged_mode);
 
     if !config.target.enable_live_boot {
         return Err(BackupError::Config(anyhow::anyhow!(
@@ -708,7 +696,7 @@ pub fn prepare_live_environment(
     ui::header("Prepare Live Boot Environment");
 
     ui::step(1, 2, "Mounting target");
-    let mount_guard = mount_target(&config, device_mode)?;
+    let mount_guard = mount_target(&config)?;
     ui::success("Target mounted");
 
     ui::step(2, 2, "Setting up live boot");
@@ -734,8 +722,6 @@ pub fn prepare_live_environment(
 mod tests {
     use super::*;
     use crate::config::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
     fn make_config(num_sources: usize, enable_live_boot: bool) -> Config {
         let sources: Vec<SourceConfig> = (0..num_sources)
@@ -964,7 +950,7 @@ abc btrbak_test single
         let mut config = make_config(1, false);
         config.target.location = TargetLocation::MountedPath(tmp.path().to_path_buf());
 
-        let guard = mount_target(&config, crate::device::DeviceAccessMode::UserSpace).unwrap();
+        let guard = mount_target(&config).unwrap();
         assert_eq!(guard.mount_point(), tmp.path());
     }
 
@@ -976,7 +962,7 @@ abc btrbak_test single
         let mut config = make_config(1, false);
         config.target.location = TargetLocation::MountedPath(missing);
 
-        let result = mount_target(&config, crate::device::DeviceAccessMode::UserSpace);
+        let result = mount_target(&config);
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(format!("{}", err).contains("does not exist"));
@@ -986,415 +972,290 @@ abc btrbak_test single
     // Integration tests (require BTRBAK_TEST_BTRFS_DIR)
     // ========================
 
-    use crate::test_util::{
-        make_source_config, make_target_config, require_btrfs_recv_dir, require_btrfs_test_dir,
-        write_test_file,
-    };
+    mod root_required_tests_show_ops {
+        use super::*;
+        use crate::test_util::{make_source_config, require_btrfs_test_dir, write_test_file};
 
-    // --- Local snapshot (manual) ---
+        // --- Local snapshot (manual) ---
 
-    #[test]
-    fn test_backup_create_manual_snapshot_first() {
-        let td = require_btrfs_test_dir!("manual_snap_first");
+        #[test]
+        fn test_backup_create_manual_snapshot_first() {
+            let td = require_btrfs_test_dir!("manual_snap_first");
 
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        write_test_file(&src, "a.txt", "aaa");
+            let src = td.path.join("src");
+            btrfs::create_subvolume(&src).unwrap();
+            write_test_file(&src, "a.txt", "aaa");
 
-        let snap_dir = td.path.join("snaps");
-        fs::create_dir_all(&snap_dir).unwrap();
+            let snap_dir = td.path.join("snaps");
+            fs::create_dir_all(&snap_dir).unwrap();
 
-        let source = make_source_config(&src, Path::new("snaps"));
+            let source = make_source_config(&src, Path::new("snaps"));
 
-        let (snap_path, parent) =
-            create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+            let (snap_path, parent) =
+                create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
 
-        assert!(btrfs::is_subvolume(&snap_path).unwrap());
-        assert!(parent.is_none());
-        assert_eq!(fs::read_to_string(snap_path.join("a.txt")).unwrap(), "aaa");
+            assert!(btrfs::is_subvolume(&snap_path).unwrap());
+            assert!(parent.is_none());
+            assert_eq!(fs::read_to_string(snap_path.join("a.txt")).unwrap(), "aaa");
+        }
+
+        #[test]
+        fn test_backup_create_manual_snapshot_incremental() {
+            let td = require_btrfs_test_dir!("manual_snap_incr");
+
+            let src = td.path.join("src");
+            btrfs::create_subvolume(&src).unwrap();
+            write_test_file(&src, "a.txt", "v1");
+
+            let snap_dir = td.path.join("snaps");
+            fs::create_dir_all(&snap_dir).unwrap();
+
+            let source = make_source_config(&src, Path::new("snaps"));
+
+            // First snapshot
+            let (snap1, _) =
+                create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+            assert!(btrfs::is_subvolume(&snap1).unwrap());
+
+            // Update source
+            write_test_file(&src, "a.txt", "v2");
+
+            // Second snapshot — previous snapshot becomes parent
+            let (snap2, parent) =
+                create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+            assert!(btrfs::is_subvolume(&snap2).unwrap());
+            assert!(parent.is_some());
+            assert!(btrfs::is_subvolume(parent.as_ref().unwrap()).unwrap());
+        }
+
+        #[test]
+        fn test_backup_create_manual_snapshot_cleans_old_prev() {
+            let td = require_btrfs_test_dir!("manual_snap_clean");
+
+            let src = td.path.join("src");
+            btrfs::create_subvolume(&src).unwrap();
+
+            let snap_dir = td.path.join("snaps");
+            fs::create_dir_all(&snap_dir).unwrap();
+
+            let source = make_source_config(&src, Path::new("snaps"));
+
+            // Round 1: creates btrbak_test
+            let (_s1, _) = create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+
+            // Round 2: renames round-1 snapshot to btrbak_test_prev, creates new btrbak_test
+            let (_s2, prev2) =
+                create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+            let prev2_path = prev2.unwrap();
+            // prev2_path holds the round-1 snapshot; capture its subvolume ID
+            let prev2_id = btrfs::get_subvolume_id(&prev2_path).unwrap();
+
+            // Round 3: deletes old _prev (round-1), renames round-2 to _prev, creates new
+            let (_s3, prev3) =
+                create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
+
+            // The path btrbak_test_prev still exists, but it now holds a DIFFERENT
+            // subvolume (the round-2 snapshot), confirming the old _prev was deleted.
+            let prev3_path = prev3.as_ref().unwrap();
+            assert!(btrfs::is_subvolume(prev3_path).unwrap());
+            let prev3_id = btrfs::get_subvolume_id(prev3_path).unwrap();
+            assert_ne!(prev2_id, prev3_id, "old _prev should have been replaced");
+
+            // Only 2 subvolumes should remain: btrbak_test and btrbak_test_prev
+            let subvol_count = fs::read_dir(&snap_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| btrfs::is_subvolume(&e.path()).unwrap_or(false))
+                .count();
+            assert_eq!(subvol_count, 2);
+        }
+
+        #[test]
+        fn test_backup_create_local_snapshot() {
+            let td = require_btrfs_test_dir!("local_snap");
+
+            let src = td.path.join("src");
+            btrfs::create_subvolume(&src).unwrap();
+            write_test_file(&src, "x.txt", "xx");
+
+            // create_local_snapshot expects snapshot_dir relative to source
+            let source = make_source_config(&src, Path::new(".snapshots"));
+
+            let (snap_path, parent) = create_local_snapshot(&source, "test").unwrap();
+            assert!(btrfs::is_subvolume(&snap_path).unwrap());
+            assert!(parent.is_none());
+
+            // .snapshots dir should have been auto-created
+            assert!(src.join(".snapshots").exists());
+        }
+
+        #[test]
+        fn test_backup_create_local_snapshot_not_subvolume() {
+            let td = require_btrfs_test_dir!("local_snap_nosv");
+
+            let plain = td.path.join("plain");
+            fs::create_dir_all(&plain).unwrap();
+
+            let source = make_source_config(&plain, Path::new(".snapshots"));
+            let err = create_local_snapshot(&source, "test");
+            assert!(err.is_err());
+        }
+
+        #[test]
+        fn test_backup_cleanup_old_snapshot_manual() {
+            let td = require_btrfs_test_dir!("cleanup_manual");
+
+            let src = td.path.join("src");
+            btrfs::create_subvolume(&src).unwrap();
+
+            let snap_dir = src.join(".snapshots");
+            fs::create_dir_all(&snap_dir).unwrap();
+
+            let source = make_source_config(&src, Path::new(".snapshots"));
+
+            // Create a "previous" snapshot subvolume
+            let prev = snap_dir.join("btrbak_test_prev");
+            btrfs::create_subvolume(&prev).unwrap();
+
+            cleanup_old_snapshot(&source, Some(prev.clone()), "test").unwrap();
+            assert!(!prev.exists());
+        }
+
+        #[test]
+        fn test_backup_cleanup_old_snapshot_none() {
+            let td = require_btrfs_test_dir!("cleanup_none");
+
+            let src = td.path.join("src");
+            btrfs::create_subvolume(&src).unwrap();
+
+            let source = make_source_config(&src, Path::new(".snapshots"));
+
+            // parent is None — should be a no-op
+            cleanup_old_snapshot(&source, None, "test").unwrap();
+        }
+
+        #[test]
+        fn test_backup_cleanup_old_snapshot_non_subvolume_parent_is_noop() {
+            let td = require_btrfs_test_dir!("cleanup_plain_parent");
+
+            let src = td.path.join("src");
+            btrfs::create_subvolume(&src).unwrap();
+            let source = make_source_config(&src, Path::new(".snapshots"));
+
+            let plain_parent = src.join(".snapshots").join("btrbak_test_prev");
+            fs::create_dir_all(&plain_parent).unwrap();
+            fs::write(plain_parent.join("keep.txt"), "keep").unwrap();
+
+            cleanup_old_snapshot(&source, Some(plain_parent.clone()), "test").unwrap();
+
+            assert!(plain_parent.exists());
+            assert_eq!(
+                fs::read_to_string(plain_parent.join("keep.txt")).unwrap(),
+                "keep"
+            );
+        }
+
+        // End-to-end workflow tests are now in tests/backup_workflow_integration.rs
+        // to follow Rust's external integration-test convention.
     }
 
-    #[test]
-    fn test_backup_create_manual_snapshot_incremental() {
-        let td = require_btrfs_test_dir!("manual_snap_incr");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        write_test_file(&src, "a.txt", "v1");
-
-        let snap_dir = td.path.join("snaps");
-        fs::create_dir_all(&snap_dir).unwrap();
-
-        let source = make_source_config(&src, Path::new("snaps"));
-
-        // First snapshot
-        let (snap1, _) = create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
-        assert!(btrfs::is_subvolume(&snap1).unwrap());
-
-        // Update source
-        write_test_file(&src, "a.txt", "v2");
-
-        // Second snapshot — previous snapshot becomes parent
-        let (snap2, parent) =
-            create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
-        assert!(btrfs::is_subvolume(&snap2).unwrap());
-        assert!(parent.is_some());
-        assert!(btrfs::is_subvolume(parent.as_ref().unwrap()).unwrap());
-    }
-
-    #[test]
-    fn test_backup_create_manual_snapshot_cleans_old_prev() {
-        let td = require_btrfs_test_dir!("manual_snap_clean");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-
-        let snap_dir = td.path.join("snaps");
-        fs::create_dir_all(&snap_dir).unwrap();
-
-        let source = make_source_config(&src, Path::new("snaps"));
-
-        // Round 1: creates btrbak_test
-        let (_s1, _) = create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
-
-        // Round 2: renames round-1 snapshot to btrbak_test_prev, creates new btrbak_test
-        let (_s2, prev2) = create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
-        let prev2_path = prev2.unwrap();
-        // prev2_path holds the round-1 snapshot; capture its subvolume ID
-        let prev2_id = btrfs::get_subvolume_id(&prev2_path).unwrap();
-
-        // Round 3: deletes old _prev (round-1), renames round-2 to _prev, creates new
-        let (_s3, prev3) = create_manual_local_snapshot(&source, &src, &snap_dir, "test").unwrap();
-
-        // The path btrbak_test_prev still exists, but it now holds a DIFFERENT
-        // subvolume (the round-2 snapshot), confirming the old _prev was deleted.
-        let prev3_path = prev3.as_ref().unwrap();
-        assert!(btrfs::is_subvolume(prev3_path).unwrap());
-        let prev3_id = btrfs::get_subvolume_id(prev3_path).unwrap();
-        assert_ne!(prev2_id, prev3_id, "old _prev should have been replaced");
-
-        // Only 2 subvolumes should remain: btrbak_test and btrbak_test_prev
-        let subvol_count = fs::read_dir(&snap_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| btrfs::is_subvolume(&e.path()).unwrap_or(false))
-            .count();
-        assert_eq!(subvol_count, 2);
-    }
-
-    #[test]
-    fn test_backup_create_local_snapshot() {
-        let td = require_btrfs_test_dir!("local_snap");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        write_test_file(&src, "x.txt", "xx");
-
-        // create_local_snapshot expects snapshot_dir relative to source
-        let source = make_source_config(&src, Path::new(".snapshots"));
-
-        let (snap_path, parent) = create_local_snapshot(&source, "test").unwrap();
-        assert!(btrfs::is_subvolume(&snap_path).unwrap());
-        assert!(parent.is_none());
-
-        // .snapshots dir should have been auto-created
-        assert!(src.join(".snapshots").exists());
-    }
-
-    #[test]
-    fn test_backup_create_local_snapshot_not_subvolume() {
-        let td = require_btrfs_test_dir!("local_snap_nosv");
-
-        let plain = td.path.join("plain");
-        fs::create_dir_all(&plain).unwrap();
-
-        let source = make_source_config(&plain, Path::new(".snapshots"));
-        let err = create_local_snapshot(&source, "test");
-        assert!(err.is_err());
-    }
-
-    // --- Send & cleanup ---
-
-    #[test]
-    fn test_backup_send_snapshot() {
-        let td = require_btrfs_test_dir!("send_snap");
-        let td_recv = require_btrfs_recv_dir!("send_snap");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        write_test_file(&src, "f.txt", "content");
-
-        let snap_dir = src.join(".snapshots");
-        fs::create_dir_all(&snap_dir).unwrap();
-
-        let snap = snap_dir.join("btrbak_test");
-        btrfs::create_snapshot(&src, &snap).unwrap();
-
-        let target_dir = td_recv.path.join("target");
-        fs::create_dir_all(&target_dir).unwrap();
-
-        let source = make_source_config(&src, Path::new(".snapshots"));
-        let target_config = make_target_config(&target_dir);
-
-        let stats = send_snapshot(&source, &target_config, &snap, None, &target_dir).unwrap();
-        assert!(stats.bytes > 0);
-
-        // The sent subvolume should be named with _vol suffix
-        let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
-        let received = target_dir.join(&vol_name);
-        assert!(btrfs::is_subvolume(&received).unwrap());
-    }
-
-    #[test]
-    fn test_backup_send_snapshot_live_boot_layout() {
-        let td = require_btrfs_test_dir!("send_snap_liveboot");
-        let td_recv = require_btrfs_recv_dir!("send_snap_liveboot");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        write_test_file(&src, "f.txt", "content");
-
-        let snap_dir = src.join(".snapshots");
-        fs::create_dir_all(&snap_dir).unwrap();
-
-        let snap = snap_dir.join("btrbak_test");
-        btrfs::create_snapshot(&src, &snap).unwrap();
-
-        let target_dir = td_recv.path.join("target");
-        fs::create_dir_all(&target_dir).unwrap();
-
-        let source = make_source_config(&src, Path::new(".snapshots"));
-        let mut target_config = make_target_config(&target_dir);
-        target_config.enable_live_boot = true;
-
-        let stats = send_snapshot(&source, &target_config, &snap, None, &target_dir).unwrap();
-        assert!(stats.bytes > 0);
-
-        let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
-        let received = target_dir.join("@snapshots").join(&vol_name);
-        assert!(btrfs::is_subvolume(&received).unwrap());
-        assert!(!target_dir.join(&vol_name).exists());
-    }
-
-    #[test]
-    fn test_backup_cleanup_old_snapshot_manual() {
-        let td = require_btrfs_test_dir!("cleanup_manual");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-
-        let snap_dir = src.join(".snapshots");
-        fs::create_dir_all(&snap_dir).unwrap();
-
-        let source = make_source_config(&src, Path::new(".snapshots"));
-
-        // Create a "previous" snapshot subvolume
-        let prev = snap_dir.join("btrbak_test_prev");
-        btrfs::create_subvolume(&prev).unwrap();
-
-        cleanup_old_snapshot(&source, Some(prev.clone()), "test").unwrap();
-        assert!(!prev.exists());
-    }
-
-    #[test]
-    fn test_backup_cleanup_old_snapshot_none() {
-        let td = require_btrfs_test_dir!("cleanup_none");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-
-        let source = make_source_config(&src, Path::new(".snapshots"));
-
-        // parent is None — should be a no-op
-        cleanup_old_snapshot(&source, None, "test").unwrap();
-    }
-
-    #[test]
-    fn test_backup_cleanup_old_snapshot_non_subvolume_parent_is_noop() {
-        let td = require_btrfs_test_dir!("cleanup_plain_parent");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        let source = make_source_config(&src, Path::new(".snapshots"));
-
-        let plain_parent = src.join(".snapshots").join("btrbak_test_prev");
-        fs::create_dir_all(&plain_parent).unwrap();
-        fs::write(plain_parent.join("keep.txt"), "keep").unwrap();
-
-        cleanup_old_snapshot(&source, Some(plain_parent.clone()), "test").unwrap();
-
-        assert!(plain_parent.exists());
-        assert_eq!(
-            fs::read_to_string(plain_parent.join("keep.txt")).unwrap(),
-            "keep"
-        );
-    }
-
-    // --- End-to-end ---
-
-    #[test]
-    fn test_backup_single_source_full() {
-        let td = require_btrfs_test_dir!("e2e_full");
-        let td_recv = require_btrfs_recv_dir!("e2e_full");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        write_test_file(&src, "file.txt", "hello");
-
-        let target_dir = td_recv.path.join("target");
-        fs::create_dir_all(&target_dir).unwrap();
-
-        let source = make_source_config(&src, Path::new(".snapshots"));
-        let target_config = make_target_config(&target_dir);
-
-        let stats = backup_single_source(&source, &target_config, &target_dir, "test").unwrap();
-        assert!(stats.bytes > 0);
-
-        // Target should contain the volume
-        let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
-        let target_vol = target_dir.join(&vol_name);
-        assert!(btrfs::is_subvolume(&target_vol).unwrap());
-    }
-
-    #[test]
-    fn test_backup_single_source_incremental() {
-        let td = require_btrfs_test_dir!("e2e_incr");
-        let td_recv = require_btrfs_recv_dir!("e2e_incr");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        write_test_file(&src, "v1.txt", "v1");
-
-        let target_dir = td_recv.path.join("target");
-        fs::create_dir_all(&target_dir).unwrap();
-
-        let source = make_source_config(&src, Path::new(".snapshots"));
-        let target_config = make_target_config(&target_dir);
-
-        // First backup (full)
-        backup_single_source(&source, &target_config, &target_dir, "test").unwrap();
-
-        // Update source
-        write_test_file(&src, "v2.txt", "v2");
-
-        // Second backup (incremental)
-        let stats = backup_single_source(&source, &target_config, &target_dir, "test").unwrap();
-        assert!(stats.bytes > 0);
-
-        let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
-        let target_vol = target_dir.join(&vol_name);
-        assert!(btrfs::is_subvolume(&target_vol).unwrap());
-        assert_eq!(fs::read_to_string(target_vol.join("v2.txt")).unwrap(), "v2");
-    }
-
-    #[test]
-    fn test_backup_single_source_send_failure_keeps_recoverable_state() {
-        let td = require_btrfs_test_dir!("e2e_send_fail_state");
-        let td_recv = require_btrfs_recv_dir!("e2e_send_fail_state");
-
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        write_test_file(&src, "v1.txt", "v1");
-
-        let target_dir = td_recv.path.join("target");
-        fs::create_dir_all(&target_dir).unwrap();
-
-        let source = make_source_config(&src, Path::new(".snapshots"));
-        let target_config = make_target_config(&target_dir);
-
-        // Baseline successful backup.
-        backup_single_source(&source, &target_config, &target_dir, "test").unwrap();
-        let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
-        let target_vol = target_dir.join(&vol_name);
-        let target_id_before = btrfs::get_subvolume_id(&target_vol).unwrap();
-
-        // Prepare incremental update.
-        write_test_file(&src, "v2.txt", "v2");
-        let expected_snapshot = src.join(".snapshots").join("btrbak_test");
-        let expected_snapshot_s = expected_snapshot.display().to_string();
-
-        // Fail only the send for the freshly created snapshot path.
-        let _runner = crate::test_util::scoped_hook_command_runner(
-            crate::test_util::HookCommandRunner::new().with_spawn_hook(move |cmd| {
-                let args = crate::test_util::command_args(cmd);
-                if crate::test_util::command_program(cmd) == "btrfs"
-                    && args.first().map(String::as_str) == Some("send")
-                    && args.last().map(String::as_str) == Some(expected_snapshot_s.as_str())
-                {
-                    let mut fail = std::process::Command::new("sh");
-                    fail.arg("-c")
-                        .arg("echo \"injected send failure\" >&2; exit 55")
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped());
-                    return Some(fail.spawn());
+    mod root_required_tests {
+        use super::*;
+        use crate::test_util::{
+            make_source_config, make_target_config, require_btrfs_recv_dir, require_btrfs_test_dir,
+            write_test_file,
+        };
+        use std::process::Command;
+
+        fn ensure_root_for_root_required_tests() -> bool {
+            let output = match Command::new("id").arg("-u").output() {
+                Ok(output) => output,
+                Err(_) => {
+                    eprintln!("Skipped: failed to determine current uid");
+                    return false;
                 }
-                None
-            }),
-        );
+            };
 
-        let result = backup_single_source(&source, &target_config, &target_dir, "test");
-        assert!(result.is_err());
+            if !output.status.success() {
+                eprintln!("Skipped: failed to determine current uid");
+                return false;
+            }
 
-        // Local snapshots should remain for retry: current + prev both present.
-        let snap_current = src.join(".snapshots").join("btrbak_test");
-        let snap_prev = src.join(".snapshots").join("btrbak_test_prev");
-        assert!(btrfs::is_subvolume(&snap_current).unwrap());
-        assert!(btrfs::is_subvolume(&snap_prev).unwrap());
+            if String::from_utf8_lossy(&output.stdout).trim() == "0" {
+                true
+            } else {
+                eprintln!("Skipped: root_required_tests require root");
+                false
+            }
+        }
 
-        // Target should stay at previous generation, with no backup residue.
-        assert!(btrfs::is_subvolume(&target_vol).unwrap());
-        assert_eq!(
-            btrfs::get_subvolume_id(&target_vol).unwrap(),
-            target_id_before
-        );
-        assert_eq!(fs::read_to_string(target_vol.join("v1.txt")).unwrap(), "v1");
-        assert!(!target_vol.join("v2.txt").exists());
-        assert!(!target_dir.join(format!("{}.old", vol_name)).exists());
-    }
+        #[test]
+        fn test_backup_send_snapshot() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
 
-    #[test]
-    fn test_run_backup_dry_run_has_no_side_effects() {
-        let td = require_btrfs_test_dir!("run_backup_dry_run");
-        let td_recv = require_btrfs_recv_dir!("run_backup_dry_run");
+            let td = require_btrfs_test_dir!("send_snap");
+            let td_recv = require_btrfs_recv_dir!("send_snap");
 
-        let src = td.path.join("src");
-        btrfs::create_subvolume(&src).unwrap();
-        write_test_file(&src, "seed.txt", "seed");
+            let src = td.path.join("src");
+            btrfs::create_subvolume(&src).unwrap();
+            write_test_file(&src, "f.txt", "content");
 
-        let target_dir = td_recv.path.join("target");
-        fs::create_dir_all(&target_dir).unwrap();
+            let snap_dir = src.join(".snapshots");
+            fs::create_dir_all(&snap_dir).unwrap();
 
-        let mut cfg_file = NamedTempFile::new().unwrap();
-        let escaped_src = src
-            .display()
-            .to_string()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let escaped_target = target_dir
-            .display()
-            .to_string()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let cfg = format!(
-            r#"
-name = "dry_run_only"
+            let snap = snap_dir.join("btrbak_test");
+            btrfs::create_snapshot(&src, &snap).unwrap();
 
-[[sources]]
-path = "{escaped_src}"
-snapshot_dir = ".snapshots"
-use_snapper = false
-snapshot_name = "btrbak"
+            let target_dir = td_recv.path.join("target");
+            fs::create_dir_all(&target_dir).unwrap();
 
-[target]
-location = "{escaped_target}"
-enable_live_boot = false
-"#
-        );
-        cfg_file.write_all(cfg.as_bytes()).unwrap();
+            let source = make_source_config(&src, Path::new(".snapshots"));
+            let target_config = make_target_config(&target_dir);
 
-        run_backup(cfg_file.path(), true, false).unwrap();
+            let stats = send_snapshot(&source, &target_config, &snap, None, &target_dir).unwrap();
+            assert!(stats.bytes > 0);
 
-        assert!(!src.join(".snapshots").exists());
-        assert!(fs::read_dir(&target_dir).unwrap().next().is_none());
+            // The sent subvolume should be named with _vol suffix
+            let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
+            let received = target_dir.join(&vol_name);
+            assert!(btrfs::is_subvolume(&received).unwrap());
+        }
+
+        #[test]
+        fn test_backup_send_snapshot_live_boot_layout() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
+
+            let td = require_btrfs_test_dir!("send_snap_liveboot");
+            let td_recv = require_btrfs_recv_dir!("send_snap_liveboot");
+
+            let src = td.path.join("src");
+            btrfs::create_subvolume(&src).unwrap();
+            write_test_file(&src, "f.txt", "content");
+
+            let snap_dir = src.join(".snapshots");
+            fs::create_dir_all(&snap_dir).unwrap();
+
+            let snap = snap_dir.join("btrbak_test");
+            btrfs::create_snapshot(&src, &snap).unwrap();
+
+            let target_dir = td_recv.path.join("target");
+            fs::create_dir_all(&target_dir).unwrap();
+
+            let source = make_source_config(&src, Path::new(".snapshots"));
+            let mut target_config = make_target_config(&target_dir);
+            target_config.enable_live_boot = true;
+
+            let stats = send_snapshot(&source, &target_config, &snap, None, &target_dir).unwrap();
+            assert!(stats.bytes > 0);
+
+            let vol_name = btrfs::get_subvolume_name_with_suffix(&src);
+            let received = target_dir.join("@snapshots").join(&vol_name);
+            assert!(btrfs::is_subvolume(&received).unwrap());
+            assert!(!target_dir.join(&vol_name).exists());
+        }
     }
 }

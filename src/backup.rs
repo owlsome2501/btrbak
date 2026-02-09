@@ -797,6 +797,7 @@ pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
     liveboot::prepare_live_boot(
         mount_guard.mount_point(),
         live_boot_config,
+        &config.target,
         esp_mount.mount_point(),
         live_boot_subvolume,
         snapshot_subvolume,

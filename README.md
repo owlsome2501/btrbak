@@ -100,6 +100,9 @@ names automatically: `/` -> `root_vol`, `/home` -> `home_vol`,
 ### `[target.encryption]` — LUKS encryption (optional)
 
 At least one of `keyfile` or `passphrase_env` must be provided.
+When live boot is enabled and `target.location` is a device identifier,
+`prepare-live` generates a LUKS-aware boot entry automatically (including
+`rd.luks.name` / `rd.luks.options`).
 
 | Field            | Required | Default           | Description                                                               |
 | ---------------- | -------- | ----------------- | ------------------------------------------------------------------------- |
@@ -125,7 +128,7 @@ Required when `target.enable_live_boot = true`.
 | `kernel`    | no       | `"/boot/vmlinuz-linux"`       | Kernel image path inside the live boot root subvolume.    |
 | `initramfs` | no       | `"/boot/initramfs-linux.img"` | Initramfs image path inside the live boot root subvolume. |
 | `microcode` | no       | —                             | CPU microcode image path (e.g. `"/boot/amd-ucode.img"`).  |
-| `options`   | no       | `[]`                          | Additional kernel command line options.                   |
+| `options`   | no       | `[]`                          | Additional kernel command line options (excluding auto-managed `root=`, `rootflags=`, and `rd.luks.*`). |
 
 ### `[hooks]` — post-backup hooks
 

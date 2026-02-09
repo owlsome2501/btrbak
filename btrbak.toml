@@ -81,6 +81,8 @@ location = "/mnt/backup"
 # (optional) dm-crypt mapping name for the unlocked device.
 # Default: "backup_target"
 # mapping_name = "backup_target"
+# Note: when live boot is enabled and target.location is a device identifier,
+# btrbak auto-generates rd.luks.* kernel parameters in the boot entry.
 
 # ---------------------------------------------------------------------------
 # Live boot (optional, required when enable_live_boot = true)
@@ -113,6 +115,7 @@ location = "/mnt/backup"
 # microcode = "/boot/amd-ucode.img"
 # (optional) Additional kernel command line options.
 # Default: []
+# root= / rootflags= / rd.luks.* are managed automatically by btrbak.
 # options = ["rw", "quiet", "rootflags=subvol=@/root_vol"]
 
 # ---------------------------------------------------------------------------

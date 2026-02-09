@@ -4,6 +4,7 @@
 set -euo pipefail
 
 IMG_SIZE="${IMG_SIZE:-512M}"
+ESP_IMG_SIZE="${ESP_IMG_SIZE:-128M}"
 BTRFS_MOUNT_OPTS="${BTRBAK_TEST_BTRFS_MOUNT_OPTS:-user_subvol_rm_allowed}"
 WORK_DIR=""
 PROJECT_DIR=""
@@ -12,8 +13,10 @@ ENV_FILE=""
 
 IMG_SRC=""
 IMG_RECV=""
+IMG_ESP=""
 SRC_LOOP=""
 RECV_LOOP=""
+ESP_LOOP=""
 MNT_SRC=""
 MNT_RECV=""
 
@@ -55,6 +58,7 @@ prepare_workspace() {
 
     IMG_SRC="$WORK_DIR/src.img"
     IMG_RECV="$WORK_DIR/recv.img"
+    IMG_ESP="$WORK_DIR/esp.img"
     MNT_SRC="$WORK_DIR/mnt_src"
     MNT_RECV="$WORK_DIR/mnt_recv"
 
@@ -64,6 +68,8 @@ prepare_workspace() {
     echo "==> Creating img files ($IMG_SIZE each)..."
     truncate -s "$IMG_SIZE" "$IMG_SRC"
     truncate -s "$IMG_SIZE" "$IMG_RECV"
+    echo "==> Creating ESP img file ($ESP_IMG_SIZE)..."
+    truncate -s "$ESP_IMG_SIZE" "$IMG_ESP"
 }
 
 setup_filesystems() {
@@ -87,6 +93,22 @@ setup_filesystems() {
 
     # Mounted-filesystem tests run as normal user; make mountpoints writable.
     run_root chown "$(id -u):$(id -g)" "$MNT_SRC" "$MNT_RECV"
+}
+
+setup_esp_loop() {
+    if ! command -v mkfs.vfat >/dev/null 2>&1; then
+        if strict_mode_enabled; then
+            echo "ERROR: mkfs.vfat is required in strict mode to prepare ESP loop device." >&2
+            echo "       Install dosfstools and re-run scripts/prepare-root-test-env.sh" >&2
+            exit 1
+        fi
+        echo "==> mkfs.vfat not found, skipping ESP test device setup."
+        return 0
+    fi
+
+    echo "==> Setting up ESP test device..."
+    ESP_LOOP="$(run_root losetup --find --show "$IMG_ESP")"
+    run_root mkfs.vfat -F 32 "$ESP_LOOP" >/dev/null
 }
 
 setup_luks_if_available() {
@@ -157,8 +179,10 @@ write_state_file() {
     _write_state_var "WORK_DIR" "$WORK_DIR"
     _write_state_var "IMG_SRC" "$IMG_SRC"
     _write_state_var "IMG_RECV" "$IMG_RECV"
+    _write_state_var "IMG_ESP" "$IMG_ESP"
     _write_state_var "SRC_LOOP" "$SRC_LOOP"
     _write_state_var "RECV_LOOP" "$RECV_LOOP"
+    _write_state_var "ESP_LOOP" "$ESP_LOOP"
     _write_state_var "MNT_SRC" "$MNT_SRC"
     _write_state_var "MNT_RECV" "$MNT_RECV"
     _write_state_var "LUKS_IMG" "$LUKS_IMG"
@@ -172,6 +196,9 @@ write_env_file() {
     printf 'export BTRBAK_TEST_BTRFS_DIR=%q\n' "$MNT_SRC" >> "$ENV_FILE"
     printf 'export BTRBAK_TEST_BTRFS_RECV_DIR=%q\n' "$MNT_RECV" >> "$ENV_FILE"
     printf 'export BTRBAK_TEST_ENV_STATE_FILE=%q\n' "$STATE_FILE" >> "$ENV_FILE"
+    if [[ -n "$ESP_LOOP" ]]; then
+        printf 'export BTRBAK_TEST_ESP_LOOP=%q\n' "$ESP_LOOP" >> "$ENV_FILE"
+    fi
 
     if [[ -n "$LUKS_LOOP" ]]; then
         printf 'export BTRBAK_TEST_LUKS_LOOP=%q\n' "$LUKS_LOOP" >> "$ENV_FILE"
@@ -219,6 +246,9 @@ cleanup_from_state() {
     fi
     if [[ -n "${RECV_LOOP:-}" ]]; then
         run_root losetup -d "$RECV_LOOP" 2>/dev/null || true
+    fi
+    if [[ -n "${ESP_LOOP:-}" ]]; then
+        run_root losetup -d "$ESP_LOOP" 2>/dev/null || true
     fi
     if [[ -n "${LUKS_LOOP:-}" ]]; then
         run_root losetup -d "$LUKS_LOOP" 2>/dev/null || true

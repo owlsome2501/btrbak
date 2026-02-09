@@ -1,7 +1,7 @@
 use crate::BackupError;
 use crate::btrfs;
 use crate::command_runner;
-use crate::config::{Config, SourceConfig, TargetConfig, TargetLocation};
+use crate::config::{Config, LiveBootConfig, SourceConfig, TargetConfig, TargetLocation};
 use crate::device;
 use crate::hooks;
 use crate::liveboot;
@@ -372,11 +372,13 @@ impl<'a> LiveEnvironmentUpdater<'a> {
                 }
             }
 
+            let esp_mount = mount_esp(live_boot_config)?;
+
             ui::substep("Running post-backup hooks");
             hooks::run_hooks(
                 &live_boot_path,
                 self.target_mount,
-                &live_boot_config.esp_path,
+                esp_mount.mount_point(),
                 &self.config.hooks,
                 &live_boot_config.boot_entry,
                 self.config,
@@ -483,6 +485,23 @@ fn mount_target(config: &Config) -> Result<device::MountGuard, BackupError> {
                 device::MountGuard::new(device)
             }
         }
+    }
+}
+
+/// Mount ESP location if needed.
+/// Returns a MountGuard that will unmount the device when dropped.
+fn mount_esp(live_boot_config: &LiveBootConfig) -> Result<device::MountGuard, BackupError> {
+    match &live_boot_config.esp_location {
+        TargetLocation::MountedPath(path) => {
+            if !path.exists() {
+                return Err(BackupError::Mount(format!(
+                    "ESP mounted path does not exist: {:?}",
+                    path
+                )));
+            }
+            Ok(device::MountGuard::for_mounted_path(path))
+        }
+        TargetLocation::Device(device) => device::MountGuard::new(device),
     }
 }
 
@@ -706,9 +725,11 @@ pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
         .snapshot_subvolume
         .as_deref()
         .unwrap_or("@snapshots");
+    let esp_mount = mount_esp(live_boot_config)?;
     liveboot::prepare_live_boot(
         mount_guard.mount_point(),
         live_boot_config,
+        esp_mount.mount_point(),
         live_boot_subvolume,
         snapshot_subvolume,
     )?;
@@ -963,6 +984,37 @@ abc btrbak_test single
         config.target.location = TargetLocation::MountedPath(missing);
 
         let result = mount_target(&config);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(format!("{}", err).contains("does not exist"));
+    }
+
+    #[test]
+    fn test_mount_esp_mounted_path_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live_boot = LiveBootConfig {
+            esp_location: TargetLocation::MountedPath(tmp.path().to_path_buf()),
+            esp_path: PathBuf::from("/efi"),
+            bootloader: BootloaderType::SystemdBoot,
+            boot_entry: BootEntryConfig::default(),
+        };
+
+        let guard = mount_esp(&live_boot).unwrap();
+        assert_eq!(guard.mount_point(), tmp.path());
+    }
+
+    #[test]
+    fn test_mount_esp_mounted_path_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("esp-missing");
+        let live_boot = LiveBootConfig {
+            esp_location: TargetLocation::MountedPath(missing),
+            esp_path: PathBuf::from("/efi"),
+            bootloader: BootloaderType::SystemdBoot,
+            boot_entry: BootEntryConfig::default(),
+        };
+
+        let result = mount_esp(&live_boot);
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(format!("{}", err).contains("does not exist"));

@@ -10,6 +10,7 @@ use std::process::Command;
 pub fn prepare_live_boot(
     btrfs_mount: &Path,
     config: &LiveBootConfig,
+    esp_mount_path: &Path,
     live_boot_subvolume: &str,
     snapshot_subvolume: &str,
 ) -> Result<(), BackupError> {
@@ -33,14 +34,14 @@ pub fn prepare_live_boot(
         btrfs::create_subvolume(&root_subvol)?;
     }
 
-    // Initialize bootloader if ESP path provided
-    if config.esp_path.exists() {
+    // Initialize bootloader if an ESP mount path is provided.
+    if esp_mount_path.exists() {
         ui::substep("Initializing systemd-boot");
-        init_systemd_boot(&config.esp_path)?;
+        init_systemd_boot(esp_mount_path)?;
         ui::substep("Creating boot entry");
         create_boot_entry(
             btrfs_mount,
-            &config.esp_path,
+            esp_mount_path,
             &config.boot_entry,
             live_boot_subvolume,
         )?;
@@ -159,7 +160,7 @@ fn find_btrfs_device(mount_point: &Path) -> Result<String, BackupError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BootloaderType, LiveBootConfig};
+    use crate::config::{BootloaderType, LiveBootConfig, TargetLocation};
     use crate::test_util::{HookCommandRunner, scoped_hook_command_runner};
     use std::path::PathBuf;
 
@@ -220,12 +221,14 @@ mod tests {
             let td = require_btrfs_test_dir!("liveboot_prepare_create");
 
             let config = LiveBootConfig {
-                esp_path: td.path.join("esp-missing"),
+                esp_location: TargetLocation::MountedPath(td.path.join("esp-unused")),
+                esp_path: PathBuf::from("/efi"),
                 bootloader: BootloaderType::SystemdBoot,
                 boot_entry: BootEntryConfig::default(),
             };
 
-            prepare_live_boot(&td.path, &config, "@", "@snapshots").unwrap();
+            let esp_mount = td.path.join("esp-missing");
+            prepare_live_boot(&td.path, &config, &esp_mount, "@", "@snapshots").unwrap();
 
             assert!(btrfs::is_subvolume(&td.path.join("@")).unwrap());
             assert!(btrfs::is_subvolume(&td.path.join("@snapshots")).unwrap());
@@ -244,12 +247,14 @@ mod tests {
             let snaps_id_before = btrfs::get_subvolume_id(&snaps).unwrap();
 
             let config = LiveBootConfig {
-                esp_path: td.path.join("esp-missing"),
+                esp_location: TargetLocation::MountedPath(td.path.join("esp-unused")),
+                esp_path: PathBuf::from("/efi"),
                 bootloader: BootloaderType::SystemdBoot,
                 boot_entry: BootEntryConfig::default(),
             };
 
-            prepare_live_boot(&td.path, &config, "@", "@snapshots").unwrap();
+            let esp_mount = td.path.join("esp-missing");
+            prepare_live_boot(&td.path, &config, &esp_mount, "@", "@snapshots").unwrap();
 
             let root_id_after = btrfs::get_subvolume_id(&root).unwrap();
             let snaps_id_after = btrfs::get_subvolume_id(&snaps).unwrap();
@@ -306,7 +311,8 @@ mod tests {
         std::fs::create_dir_all(&esp).unwrap();
 
         let config = LiveBootConfig {
-            esp_path: esp,
+            esp_location: TargetLocation::MountedPath(esp.clone()),
+            esp_path: PathBuf::from("/efi"),
             bootloader: BootloaderType::SystemdBoot,
             boot_entry: BootEntryConfig::default(),
         };
@@ -323,7 +329,7 @@ mod tests {
                 None
             }));
 
-        let result = prepare_live_boot(mount, &config, "@", "@snapshots");
+        let result = prepare_live_boot(mount, &config, &esp, "@", "@snapshots");
         assert!(result.is_err());
         assert!(format!("{}", result.err().unwrap()).contains("Failed to install systemd-boot"));
     }

@@ -1,6 +1,6 @@
 use anyhow;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use toml;
 
 use crate::btrfs;
@@ -112,7 +112,10 @@ impl<'de> serde::Deserialize<'de> for TargetLocation {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LiveBootConfig {
-    /// Path to ESP (EFI System Partition)
+    /// ESP location (mounted path or device identifier)
+    pub esp_location: TargetLocation,
+    /// Mount point path inside live boot root volume (e.g. "/efi")
+    #[serde(default = "default_esp_path")]
     pub esp_path: PathBuf,
     /// Bootloader type (currently only systemd-boot supported)
     #[serde(default = "default_bootloader")]
@@ -132,7 +135,62 @@ fn default_bootloader() -> BootloaderType {
     BootloaderType::SystemdBoot
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+fn default_esp_path() -> PathBuf {
+    PathBuf::from("/efi")
+}
+
+impl LiveBootConfig {
+    /// ESP mount directory relative to live root volume (no leading slash).
+    pub fn esp_path_relative(&self) -> PathBuf {
+        self.esp_path
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(part) => Some(part),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// ESP mount point in fstab format (always starts with '/').
+    pub fn esp_mount_point(&self) -> String {
+        let rel = self.esp_path_relative();
+        if rel.as_os_str().is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", rel.display())
+        }
+    }
+
+    /// Validate esp_path syntax for a mount point within root_vol.
+    pub fn validate_esp_path(&self) -> anyhow::Result<()> {
+        if self.esp_path.as_os_str().is_empty() {
+            anyhow::bail!("live_boot.esp_path must be non-empty");
+        }
+
+        if self
+            .esp_path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            anyhow::bail!(
+                "live_boot.esp_path must not contain '..': {:?}",
+                self.esp_path
+            );
+        }
+
+        let rel = self.esp_path_relative();
+        if rel.as_os_str().is_empty() {
+            anyhow::bail!(
+                "live_boot.esp_path must contain at least one path segment: {:?}",
+                self.esp_path
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BootEntryConfig {
     /// Title for boot menu
     #[serde(default = "default_title")]
@@ -149,6 +207,18 @@ pub struct BootEntryConfig {
     /// Additional kernel command line options
     #[serde(default)]
     pub options: Vec<String>,
+}
+
+impl Default for BootEntryConfig {
+    fn default() -> Self {
+        Self {
+            title: default_title(),
+            kernel: default_kernel(),
+            initramfs: default_initramfs(),
+            microcode: None,
+            options: Vec::new(),
+        }
+    }
 }
 
 fn default_title() -> String {
@@ -260,11 +330,20 @@ impl Config {
             anyhow::bail!("Live boot enabled but live_boot configuration missing");
         }
 
-        // If live boot configuration exists, validate ESP path
-        if let Some(live_boot) = &self.live_boot
-            && !live_boot.esp_path.exists()
-        {
-            anyhow::bail!("ESP path does not exist: {:?}", live_boot.esp_path);
+        // If live boot configuration exists, validate ESP location/path
+        if let Some(live_boot) = &self.live_boot {
+            live_boot.validate_esp_path()?;
+
+            match &live_boot.esp_location {
+                TargetLocation::MountedPath(path) => {
+                    if !path.exists() {
+                        anyhow::bail!("ESP mounted path does not exist: {:?}", path);
+                    }
+                }
+                TargetLocation::Device(_) => {
+                    // Device will be mounted later
+                }
+            }
         }
 
         // Validate encryption configuration if present
@@ -531,6 +610,7 @@ mod tests {
             location = "/dev/sda1"
             enable_live_boot = true
             [live_boot]
+            esp_location = "/dev/sda2"
             esp_path = "/efi"
             bootloader = "SystemdBoot"
             [live_boot.boot_entry]
@@ -541,6 +621,7 @@ mod tests {
         "#;
         let config: Config = toml::from_str(toml_content).unwrap();
         let lb = config.live_boot.unwrap();
+        assert!(matches!(lb.esp_location, TargetLocation::Device(_)));
         assert_eq!(lb.esp_path, PathBuf::from("/efi"));
         assert_eq!(lb.boot_entry.title, "My Backup");
         assert_eq!(lb.boot_entry.options.len(), 2);
@@ -555,11 +636,15 @@ mod tests {
             [target]
             location = "/dev/sda1"
             [live_boot]
-            esp_path = "/efi"
-            [live_boot.boot_entry]
+            esp_location = "/efi"
         "#;
         let config: Config = toml::from_str(toml_content).unwrap();
         let lb = config.live_boot.unwrap();
+        match lb.esp_location {
+            TargetLocation::MountedPath(path) => assert_eq!(path, PathBuf::from("/efi")),
+            TargetLocation::Device(_) => panic!("Expected mounted path for esp_location"),
+        }
+        assert_eq!(lb.esp_path, PathBuf::from("/efi"));
         assert_eq!(lb.boot_entry.title, "Backup Environment");
         assert_eq!(lb.boot_entry.kernel, PathBuf::from("/boot/vmlinuz-linux"));
         assert_eq!(
@@ -578,7 +663,7 @@ mod tests {
             [target]
             location = "/dev/sda1"
             [live_boot]
-            esp_path = "/efi"
+            esp_location = "/efi"
             [live_boot.boot_entry]
             options = ["root=UUID=abcd", "rw", "quiet"]
         "#;
@@ -587,6 +672,32 @@ mod tests {
         assert_eq!(opts.len(), 3);
         assert_eq!(opts[0], "root=UUID=abcd");
         assert_eq!(opts[2], "quiet");
+    }
+
+    #[test]
+    fn test_live_boot_esp_path_helpers() {
+        let live_boot = LiveBootConfig {
+            esp_location: TargetLocation::Device("/dev/sda1".to_string()),
+            esp_path: PathBuf::from("/boot/efi"),
+            bootloader: BootloaderType::SystemdBoot,
+            boot_entry: BootEntryConfig::default(),
+        };
+
+        assert_eq!(live_boot.esp_path_relative(), PathBuf::from("boot/efi"));
+        assert_eq!(live_boot.esp_mount_point(), "/boot/efi");
+        live_boot.validate_esp_path().unwrap();
+    }
+
+    #[test]
+    fn test_live_boot_esp_path_rejects_parent_dir() {
+        let live_boot = LiveBootConfig {
+            esp_location: TargetLocation::Device("/dev/sda1".to_string()),
+            esp_path: PathBuf::from("/boot/../efi"),
+            bootloader: BootloaderType::SystemdBoot,
+            boot_entry: BootEntryConfig::default(),
+        };
+
+        assert!(live_boot.validate_esp_path().is_err());
     }
 
     // HookConfig and EncryptionConfig tests

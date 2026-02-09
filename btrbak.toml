@@ -88,7 +88,11 @@ location = "/mnt/backup"
 # Uncomment to configure a bootable backup environment.
 #
 # [live_boot]
-# (required) Path to the EFI System Partition (ESP).
+# (required) ESP location. Supports mounted path, /dev path, UUID=..., LABEL=..., PARTUUID=...
+# and will be auto-mounted if a device identifier is provided.
+# esp_location = "/dev/disk/by-partuuid/...."
+# (optional) ESP mount point path inside live boot root_vol (used for /etc/fstab).
+# Default: "/efi"
 # esp_path = "/efi"
 # (optional) Bootloader type. Currently only "SystemdBoot" is supported.
 # Default: "SystemdBoot"

@@ -14,6 +14,7 @@ source "$SCRIPT_DIR/test-root-env/lib/common.sh"
 ensure_root_access
 prepare_workspace "$PROJECT_DIR"
 setup_filesystems
+setup_esp_loop
 setup_luks_if_available
 write_state_file
 write_env_file

@@ -8,6 +8,10 @@ use tempfile::NamedTempFile;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn escape_toml_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 struct MountedTestWorkspace {
     src_root: PathBuf,
     recv_root: PathBuf,
@@ -110,16 +114,8 @@ fn write_backup_config(
 ) -> NamedTempFile {
     let mut cfg_file = NamedTempFile::new().expect("failed to create temp config file");
 
-    let escaped_src = source_subvolume
-        .display()
-        .to_string()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let escaped_target = target_dir
-        .display()
-        .to_string()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let escaped_src = escape_toml_string(&source_subvolume.display().to_string());
+    let escaped_target = escape_toml_string(&target_dir.display().to_string());
 
     let cfg = format!(
         r#"
@@ -142,6 +138,70 @@ enable_live_boot = false
         .expect("failed to write config file");
 
     cfg_file
+}
+
+fn write_live_boot_config(
+    source_path: &str,
+    target_dir: &Path,
+    esp_location: &str,
+    esp_path: &str,
+    config_name: &str,
+) -> NamedTempFile {
+    let mut cfg_file = NamedTempFile::new().expect("failed to create temp config file");
+
+    let escaped_source = escape_toml_string(source_path);
+    let escaped_target = escape_toml_string(&target_dir.display().to_string());
+    let escaped_esp_location = escape_toml_string(esp_location);
+    let escaped_esp_path = escape_toml_string(esp_path);
+
+    let cfg = format!(
+        r#"
+name = "{config_name}"
+
+[[sources]]
+path = "{escaped_source}"
+snapshot_dir = ".snapshots"
+use_snapper = false
+snapshot_name = "btrbak"
+
+[target]
+location = "{escaped_target}"
+enable_live_boot = true
+
+[live_boot]
+esp_location = "{escaped_esp_location}"
+esp_path = "{escaped_esp_path}"
+
+[hooks]
+copy_kernel = true
+regenerate_fstab = true
+remove_snapper_config = false
+"#
+    );
+
+    cfg_file
+        .write_all(cfg.as_bytes())
+        .expect("failed to write config file");
+
+    cfg_file
+}
+
+struct CwdGuard {
+    original: PathBuf,
+}
+
+impl CwdGuard {
+    fn set(path: &Path) -> Self {
+        let original = std::env::current_dir().expect("failed to get current working directory");
+        std::env::set_current_dir(path).expect("failed to change current working directory");
+        Self { original }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
 }
 
 fn ensure_root_for_root_required_tests() -> bool {
@@ -263,5 +323,92 @@ mod root_required_tests {
         let target_vol = target_dir.join(btrfs::get_subvolume_name_with_suffix(&source_subvolume));
         assert!(btrfs::is_subvolume(&target_vol).unwrap());
         assert_eq!(fs::read_to_string(target_vol.join("v2.txt")).unwrap(), "v2");
+    }
+
+    #[test]
+    fn test_integration_backup_live_boot_writes_esp_contents_from_device_location() {
+        if !ensure_root_for_root_required_tests() {
+            return;
+        }
+
+        let esp_loop = match std::env::var("BTRBAK_TEST_ESP_LOOP") {
+            Ok(value) if !value.is_empty() => value,
+            _ => {
+                eprintln!("Skipped: BTRBAK_TEST_ESP_LOOP not set");
+                return;
+            }
+        };
+
+        let ws = match MountedTestWorkspace::new("live_boot_esp") {
+            Some(ws) => ws,
+            None => {
+                eprintln!("Skipped: mounted btrfs test environment not available");
+                return;
+            }
+        };
+
+        let source_subvolume = ws.src_root.join("root_src");
+        btrfs::create_subvolume(&source_subvolume).expect("failed to create source subvolume");
+        fs::create_dir_all(source_subvolume.join("boot/efi"))
+            .expect("failed to create /boot/efi in source");
+        fs::create_dir_all(source_subvolume.join("etc")).expect("failed to create /etc in source");
+        fs::write(source_subvolume.join("etc/fstab"), "# seed\n")
+            .expect("failed to write seed fstab");
+        fs::write(source_subvolume.join("boot/vmlinuz-linux"), "KERNEL_V1")
+            .expect("failed to write kernel");
+        fs::write(
+            source_subvolume.join("boot/initramfs-linux.img"),
+            "INITRAMFS_V1",
+        )
+        .expect("failed to write initramfs");
+        fs::write(
+            source_subvolume.join("boot/initramfs-linux-fallback.img"),
+            "INITRAMFS_FALLBACK_V1",
+        )
+        .expect("failed to write fallback initramfs");
+
+        let target_dir = ws.recv_root.join("target");
+        fs::create_dir_all(&target_dir).expect("failed to create target dir");
+        btrfs::create_subvolume(&target_dir.join("@")).expect("failed to create @ subvolume");
+        btrfs::create_subvolume(&target_dir.join("@snapshots"))
+            .expect("failed to create @snapshots subvolume");
+
+        let _cwd_guard = CwdGuard::set(&source_subvolume);
+        let cfg = write_live_boot_config(
+            ".",
+            &target_dir,
+            &esp_loop,
+            "/boot/efi",
+            "it_live_boot_esp_device",
+        );
+
+        backup::run_backup(cfg.path(), false).expect("live boot backup failed");
+
+        let latest_snapshot = target_dir.join("@snapshots/root_vol");
+        assert!(btrfs::is_subvolume(&latest_snapshot).unwrap());
+        let live_root = target_dir.join("@/root_vol");
+        assert!(btrfs::is_subvolume(&live_root).unwrap());
+
+        let fstab = fs::read_to_string(live_root.join("etc/fstab")).expect("failed to read fstab");
+        // ESP entry is only generated when UUID lookup succeeds in the test env.
+        if fstab.contains(" vfat ") {
+            assert!(fstab.contains("/boot/efi  vfat"));
+        }
+
+        let esp_guard = btrbak::device::MountGuard::new(&esp_loop)
+            .expect("failed to mount ESP loop for verification");
+        let esp_mount = esp_guard.mount_point();
+        assert_eq!(
+            fs::read_to_string(esp_mount.join("vmlinuz-linux")).unwrap(),
+            "KERNEL_V1"
+        );
+        assert_eq!(
+            fs::read_to_string(esp_mount.join("initramfs-linux.img")).unwrap(),
+            "INITRAMFS_V1"
+        );
+        assert_eq!(
+            fs::read_to_string(esp_mount.join("initramfs-linux-fallback.img")).unwrap(),
+            "INITRAMFS_FALLBACK_V1"
+        );
     }
 }

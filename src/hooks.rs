@@ -24,7 +24,7 @@ fn find_root_vol_path(live_boot_path: &Path, config: &crate::config::Config) -> 
 pub fn run_hooks(
     live_boot_path: &Path,
     target_mount: &Path,
-    esp_path: &Path,
+    esp_mount_path: &Path,
     hook_config: &crate::config::HookConfig,
     boot_entry: &crate::config::BootEntryConfig,
     config: &crate::config::Config,
@@ -36,12 +36,12 @@ pub fn run_hooks(
 
     if hook_config.copy_kernel {
         ui::substep("Copying kernel and initramfs to ESP");
-        copy_kernel_to_esp(&root_vol_path, esp_path, boot_entry)?;
+        copy_kernel_to_esp(&root_vol_path, esp_mount_path, boot_entry)?;
     }
 
     if hook_config.regenerate_fstab {
         ui::substep("Regenerating fstab for live boot");
-        regenerate_fstab(&root_vol_path, target_mount, esp_path, config)?;
+        regenerate_fstab(&root_vol_path, target_mount, esp_mount_path, config)?;
     }
 
     if hook_config.remove_snapper_config {
@@ -96,7 +96,14 @@ fn copy_kernel_to_esp(
 
     // Copy kernel
     if kernel_source.exists() {
-        fs::copy(&kernel_source, &kernel_dest)?;
+        fs::copy(&kernel_source, &kernel_dest).map_err(|e| {
+            BackupError::Hook(format!(
+                "Failed to copy kernel from {} to {}: {}",
+                kernel_source.display(),
+                kernel_dest.display(),
+                e
+            ))
+        })?;
         ui::detail(&format!(
             "Copied kernel: {} -> {}",
             kernel_source.display(),
@@ -108,7 +115,14 @@ fn copy_kernel_to_esp(
 
     // Copy initramfs
     if initramfs_source.exists() {
-        fs::copy(&initramfs_source, &initramfs_dest)?;
+        fs::copy(&initramfs_source, &initramfs_dest).map_err(|e| {
+            BackupError::Hook(format!(
+                "Failed to copy initramfs from {} to {}: {}",
+                initramfs_source.display(),
+                initramfs_dest.display(),
+                e
+            ))
+        })?;
         ui::detail(&format!(
             "Copied initramfs: {} -> {}",
             initramfs_source.display(),
@@ -123,7 +137,14 @@ fn copy_kernel_to_esp(
 
     // Copy fallback initramfs if exists
     if initramfs_fallback_source.exists() {
-        fs::copy(&initramfs_fallback_source, &initramfs_fallback_dest)?;
+        fs::copy(&initramfs_fallback_source, &initramfs_fallback_dest).map_err(|e| {
+            BackupError::Hook(format!(
+                "Failed to copy fallback initramfs from {} to {}: {}",
+                initramfs_fallback_source.display(),
+                initramfs_fallback_dest.display(),
+                e
+            ))
+        })?;
         ui::detail(&format!(
             "Copied fallback initramfs: {} -> {}",
             initramfs_fallback_source.display(),
@@ -137,7 +158,14 @@ fn copy_kernel_to_esp(
         let ucode_dest = esp_path.join(ucode_source.file_name().unwrap_or_default());
 
         if ucode_source.exists() {
-            fs::copy(&ucode_source, &ucode_dest)?;
+            fs::copy(&ucode_source, &ucode_dest).map_err(|e| {
+                BackupError::Hook(format!(
+                    "Failed to copy microcode from {} to {}: {}",
+                    ucode_source.display(),
+                    ucode_dest.display(),
+                    e
+                ))
+            })?;
             ui::detail(&format!(
                 "Copied microcode: {} -> {}",
                 ucode_source.display(),
@@ -158,13 +186,13 @@ fn copy_kernel_to_esp(
 fn regenerate_fstab(
     root_vol: &Path,
     target_mount: &Path,
-    esp_path: &Path,
+    esp_mount_path: &Path,
     config: &crate::config::Config,
 ) -> Result<(), BackupError> {
     let fstab_path = root_vol.join("etc/fstab");
 
     // Generate fstab entries
-    let fstab_content = generate_basic_fstab(root_vol, target_mount, esp_path, config);
+    let fstab_content = generate_basic_fstab(root_vol, target_mount, esp_mount_path, config);
 
     // Backup old fstab if exists
     if fstab_path.exists() {
@@ -173,7 +201,14 @@ fn regenerate_fstab(
             "Backing up existing fstab to: {}",
             backup_path.display()
         ));
-        fs::copy(&fstab_path, &backup_path)?;
+        fs::copy(&fstab_path, &backup_path).map_err(|e| {
+            BackupError::Hook(format!(
+                "Failed to back up fstab from {} to {}: {}",
+                fstab_path.display(),
+                backup_path.display(),
+                e
+            ))
+        })?;
     }
 
     // Analyze generated entries
@@ -201,7 +236,7 @@ fn regenerate_fstab(
 fn generate_basic_fstab(
     root_vol: &Path,
     target_mount: &Path,
-    esp_path: &Path,
+    esp_mount_path: &Path,
     config: &crate::config::Config,
 ) -> String {
     let mut lines = vec![
@@ -241,13 +276,18 @@ fn generate_basic_fstab(
     }
     lines.push("".to_string());
 
-    // Add ESP mount entry if /efi directory exists in root volume
-    let efi_dir = root_vol.join("efi");
-    if efi_dir.exists() {
-        if let Ok(esp_uuid) = get_device_uuid(esp_path) {
+    let (esp_relative_path, esp_mount_point) = match &config.live_boot {
+        Some(live_boot) => (live_boot.esp_path_relative(), live_boot.esp_mount_point()),
+        None => (PathBuf::from("efi"), "/efi".to_string()),
+    };
+
+    // Add ESP mount entry only if ESP mountpoint directory exists in root volume.
+    let esp_dir = root_vol.join(&esp_relative_path);
+    if esp_dir.exists() {
+        if let Ok(esp_uuid) = get_device_uuid(esp_mount_path) {
             lines.push(format!(
-                "UUID={}  /efi  vfat  rw,relatime,fmask=0133,dmask=0022,codepage=437,iocharset=iso8859-1,shortname=mixed,utf8,errors=remount-ro  0 2",
-                esp_uuid
+                "UUID={}  {}  vfat  rw,relatime,fmask=0133,dmask=0022,codepage=437,iocharset=iso8859-1,shortname=mixed,utf8,errors=remount-ro  0 2",
+                esp_uuid, esp_mount_point
             ));
         } else {
             ui::warning("Could not determine ESP UUID, skipping ESP fstab entry");
@@ -336,6 +376,9 @@ fn remove_snapper_config(live_boot_path: &Path) -> Result<(), BackupError> {
 mod tests {
     use super::*;
     use crate::config::*;
+    use crate::test_util::{
+        HookCommandRunner, command_args, command_program, mock_output, scoped_hook_command_runner,
+    };
     use tempfile::TempDir;
 
     // remove_snapper_config tests
@@ -561,6 +604,71 @@ mod tests {
         assert!(fstab.contains("subvol=@/home_vol"));
         // Should contain tmpfs
         assert!(fstab.contains("tmpfs  /tmp"));
+    }
+
+    #[test]
+    fn test_generate_fstab_uses_configured_esp_mount_point() {
+        let tmp = TempDir::new().unwrap();
+        let root_vol = tmp.path().join("root_vol");
+        let target_mount = tmp.path().join("target");
+        let esp_mount = tmp.path().join("esp");
+        fs::create_dir_all(root_vol.join("boot/efi")).unwrap();
+        fs::create_dir_all(&target_mount).unwrap();
+        fs::create_dir_all(&esp_mount).unwrap();
+
+        let config = Config {
+            name: "test".to_string(),
+            sources: vec![SourceConfig {
+                path: PathBuf::from("/"),
+                snapshot_dir: PathBuf::from(".snapshots"),
+                use_snapper: false,
+                snapshot_name: "btrbak".to_string(),
+                snapper_config: None,
+            }],
+            target: TargetConfig {
+                location: TargetLocation::MountedPath(PathBuf::from("/mnt")),
+                enable_live_boot: true,
+                snapshot_subvolume: None,
+                live_boot_subvolume: None,
+                encryption: None,
+            },
+            live_boot: Some(LiveBootConfig {
+                esp_location: TargetLocation::MountedPath(esp_mount.clone()),
+                esp_path: PathBuf::from("/boot/efi"),
+                bootloader: BootloaderType::SystemdBoot,
+                boot_entry: BootEntryConfig::default(),
+            }),
+            hooks: HookConfig::default(),
+        };
+
+        let target_mount_arg = target_mount.to_string_lossy().to_string();
+        let esp_mount_arg = esp_mount.to_string_lossy().to_string();
+        let _runner =
+            scoped_hook_command_runner(HookCommandRunner::new().with_output_hook(move |cmd| {
+                if command_program(cmd) != "findmnt" {
+                    return None;
+                }
+
+                let args = command_args(cmd);
+                let mount_point = args
+                    .windows(2)
+                    .find_map(|pair| (pair[0] == "--mountpoint").then(|| pair[1].as_str()));
+
+                match mount_point {
+                    Some(path) if path == target_mount_arg => {
+                        Some(Ok(mock_output(0, "target-uuid\n", "")))
+                    }
+                    Some(path) if path == esp_mount_arg => {
+                        Some(Ok(mock_output(0, "esp-uuid\n", "")))
+                    }
+                    _ => None,
+                }
+            }));
+
+        let fstab = generate_basic_fstab(&root_vol, &target_mount, &esp_mount, &config);
+
+        assert!(fstab.contains("UUID=target-uuid  /  btrfs"));
+        assert!(fstab.contains("UUID=esp-uuid  /boot/efi  vfat"));
     }
 
     #[test]

@@ -111,10 +111,11 @@ At least one of `keyfile` or `passphrase_env` must be provided.
 
 Required when `target.enable_live_boot = true`.
 
-| Field        | Required | Default         | Description                                                 |
-| ------------ | -------- | --------------- | ----------------------------------------------------------- |
-| `esp_path`   | yes      | —               | Path to the EFI System Partition (ESP). Must exist.         |
-| `bootloader` | no       | `"SystemdBoot"` | Bootloader type. Currently only `SystemdBoot` is supported. |
+| Field          | Required | Default         | Description                                                                                                                                                 |
+| -------------- | -------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `esp_location` | yes      | —               | ESP location. Accepts a mounted path or device identifier (`/dev/...`, `UUID=...`, `LABEL=...`, `PARTUUID=...`). Device identifiers are auto-mounted.   |
+| `esp_path`     | no       | `"/efi"`        | Mount point path inside live boot `root_vol` (used for generated `/etc/fstab`). Example: `"/efi"` or `"/boot/efi"`.                                     |
+| `bootloader`   | no       | `"SystemdBoot"` | Bootloader type. Currently only `SystemdBoot` is supported.                                                                                               |
 
 ### `[live_boot.boot_entry]` — bootloader entry
 

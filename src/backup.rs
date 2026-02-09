@@ -7,36 +7,104 @@ use crate::hooks;
 use crate::liveboot;
 use crate::ui;
 use fs4::fs_std::FileExt;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+/// Cross-process namespace lock used to serialize lock-file lifecycle changes.
+struct LockNamespaceGuard {
+    _lock_file: File,
+}
+
+impl LockNamespaceGuard {
+    fn acquire(lock_parent: &Path) -> Result<Self, BackupError> {
+        let namespace_lock_path = lock_parent.with_extension("namespace.lock");
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&namespace_lock_path)
+            .map_err(|e| {
+                BackupError::Lock(format!("Failed to create namespace lock file: {}", e))
+            })?;
+
+        lock_file.lock_exclusive().map_err(|e| {
+            BackupError::Lock(format!("Failed to acquire namespace lock file: {}", e))
+        })?;
+
+        Ok(Self {
+            _lock_file: lock_file,
+        })
+    }
+}
+
 /// File-based lock to prevent concurrent runs with same config name.
 struct ConfigLock {
-    _lock_file: File,
+    lock_file: Option<File>,
+    lock_path: PathBuf,
+    lock_parent: PathBuf,
 }
 
 impl ConfigLock {
     fn acquire(config_name: &str) -> Result<Self, BackupError> {
-        let lock_parent = std::env::temp_dir().join("btrbak_locks");
+        Self::acquire_with_parent(config_name, std::env::temp_dir().join("btrbak_locks"))
+    }
+
+    #[cfg(test)]
+    fn acquire_for_tests(config_name: &str, lock_parent: PathBuf) -> Result<Self, BackupError> {
+        Self::acquire_with_parent(config_name, lock_parent)
+    }
+
+    fn lock_path(lock_parent: &Path, config_name: &str) -> PathBuf {
+        lock_parent.join(format!("{}.lock", config_name))
+    }
+
+    fn acquire_with_parent(config_name: &str, lock_parent: PathBuf) -> Result<Self, BackupError> {
+        let _namespace_guard = LockNamespaceGuard::acquire(&lock_parent)?;
+
         fs::create_dir_all(&lock_parent).map_err(|e| {
             BackupError::Lock(format!("Failed to create lock parent directory: {}", e))
         })?;
 
-        let lock_path = lock_parent.join(format!("{}.lock", config_name));
-        let lock_file = File::create(&lock_path)
+        let lock_path = Self::lock_path(&lock_parent, config_name);
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
             .map_err(|e| BackupError::Lock(format!("Failed to create lock file: {}", e)))?;
 
         match lock_file.try_lock_exclusive() {
             Ok(_) => Ok(Self {
-                _lock_file: lock_file,
+                lock_file: Some(lock_file),
+                lock_path,
+                lock_parent,
             }),
             Err(_) => Err(BackupError::Lock(format!(
                 "Another btrbak instance is already running with config name '{}'",
                 config_name
             ))),
         }
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        let Ok(_namespace_guard) = LockNamespaceGuard::acquire(&self.lock_parent) else {
+            self.lock_file.take();
+            return;
+        };
+
+        if let Some(lock_file) = self.lock_file.take() {
+            let _ = lock_file.unlock();
+            drop(lock_file);
+        }
+
+        let _ = fs::remove_file(&self.lock_path);
+        let _ = fs::remove_dir(&self.lock_parent);
     }
 }
 
@@ -743,6 +811,7 @@ pub fn prepare_live_environment(config_path: &Path) -> Result<(), BackupError> {
 mod tests {
     use super::*;
     use crate::config::*;
+    use tempfile::TempDir;
 
     fn make_config(num_sources: usize, enable_live_boot: bool) -> Config {
         let sources: Vec<SourceConfig> = (0..num_sources)
@@ -792,12 +861,41 @@ mod tests {
 
     #[test]
     fn test_config_lock_acquire_release() {
-        let lock = ConfigLock::acquire("test_lock_acquire_release");
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let lock_parent = temp_dir.path().join("btrbak_locks");
+
+        let lock = ConfigLock::acquire_for_tests("test_lock_acquire_release", lock_parent.clone());
         assert!(lock.is_ok());
+        let lock_path = ConfigLock::lock_path(&lock_parent, "test_lock_acquire_release");
+        assert!(lock_path.exists());
         drop(lock);
+        assert!(!lock_path.exists());
+        assert!(!lock_parent.exists());
         // After releasing, should be able to acquire again
-        let lock2 = ConfigLock::acquire("test_lock_acquire_release");
+        let lock2 = ConfigLock::acquire_for_tests("test_lock_acquire_release", lock_parent);
         assert!(lock2.is_ok());
+    }
+
+    #[test]
+    fn test_config_lock_drop_keeps_parent_while_other_lock_active() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let lock_parent = temp_dir.path().join("btrbak_locks");
+
+        let lock1 = ConfigLock::acquire_for_tests("test_lock_1", lock_parent.clone());
+        let lock2 = ConfigLock::acquire_for_tests("test_lock_2", lock_parent.clone());
+        assert!(lock1.is_ok());
+        assert!(lock2.is_ok());
+
+        let lock1 = lock1.expect("failed to acquire lock1");
+        let lock2 = lock2.expect("failed to acquire lock2");
+        let lock2_path = ConfigLock::lock_path(&lock_parent, "test_lock_2");
+
+        drop(lock1);
+        assert!(lock_parent.exists());
+        assert!(lock2_path.exists());
+
+        drop(lock2);
+        assert!(!lock_parent.exists());
     }
 
     #[test]

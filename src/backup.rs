@@ -298,7 +298,11 @@ impl<'a> SourceSnapshot<'a> {
         let config_name = self.snapper_config()?;
 
         let mut cmd = Command::new("snapper");
-        cmd.arg("-c")
+        cmd.arg("--csvout")
+            .arg("--separator")
+            .arg("\t")
+            .arg("--no-headers")
+            .arg("-c")
             .arg(config_name)
             .arg("list")
             .arg("--columns")
@@ -325,22 +329,24 @@ impl<'a> SourceSnapshot<'a> {
         let mut backup_snapshots = Vec::new();
 
         for line in output.lines() {
-            if line.trim().is_empty() || line.starts_with('#') {
+            if line.trim().is_empty() {
                 continue;
             }
 
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 3 {
+            let mut parts = line.splitn(3, '\t');
+            let Some(number) = parts.next() else {
                 continue;
-            }
+            };
+            let Some(description) = parts.next() else {
+                continue;
+            };
+            let Some(snapshot_type) = parts.next() else {
+                continue;
+            };
 
-            let number = parts[0];
-            let description = parts[1];
-            let snapshot_type = parts[2];
-
-            if snapshot_type == "single"
+            if snapshot_type.trim() == "single"
                 && description == expected_description
-                && let Ok(id) = number.parse::<u64>()
+                && let Ok(id) = number.trim().parse::<u64>()
             {
                 backup_snapshots.push(id);
             }
@@ -914,12 +920,11 @@ mod tests {
     #[test]
     fn test_parse_snapper_snapshot_ids_filters_expected_single_only() {
         let output = r#"
-# | number | description | type
-41 btrbak_test single
-42 btrbak_test pre
-43 other single
-abc btrbak_test single
-44 btrbak_test single
+41	btrbak_test	single
+42	btrbak_test	pre
+43	other	single
+abc	btrbak_test	single
+44	btrbak_test	single
 "#;
 
         let ids = SourceSnapshot::parse_btrbak_snapper_snapshot_ids(output, "btrbak_test");
@@ -930,9 +935,15 @@ abc btrbak_test single
     fn test_parse_snapper_snapshot_ids_ignores_malformed_lines() {
         let output = r#"
 99
-100 only-two-columns
-   # comment
+100	only-two-columns
 "#;
+        let ids = SourceSnapshot::parse_btrbak_snapper_snapshot_ids(output, "btrbak_test");
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_parse_snapper_snapshot_ids_ignores_table_style_output() {
+        let output = "1031 │ btrbak_test │ single\n";
         let ids = SourceSnapshot::parse_btrbak_snapper_snapshot_ids(output, "btrbak_test");
         assert!(ids.is_empty());
     }
@@ -1030,6 +1041,45 @@ abc btrbak_test single
         let result = workflow.list_btrbak_snapper_snapshot_ids();
         assert!(result.is_err());
         assert!(format!("{}", result.err().unwrap()).contains("Failed to list snapper snapshots"));
+    }
+
+    #[test]
+    fn test_list_snapper_snapshot_ids_uses_machine_readable_output_flags() {
+        let source = SourceConfig {
+            path: PathBuf::from("/snapper-source"),
+            snapshot_dir: PathBuf::from(".snapshots"),
+            use_snapper: true,
+            snapshot_name: "btrbak".to_string(),
+            snapper_config: Some("root".to_string()),
+        };
+        let workflow = SourceSnapshot::new(&source, "test");
+
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(|cmd| {
+                if crate::test_util::command_program(cmd) == "snapper"
+                    && crate::test_util::command_args(cmd)
+                        .iter()
+                        .any(|arg| arg == "list")
+                {
+                    let args = crate::test_util::command_args(cmd);
+                    assert!(args.iter().any(|arg| arg == "--csvout"));
+                    assert!(args.iter().any(|arg| arg == "--no-headers"));
+                    assert!(
+                        args.windows(2)
+                            .any(|window| window[0] == "--separator" && window[1] == "\t")
+                    );
+                    return Some(Ok(crate::test_util::mock_output(
+                        0,
+                        "41\tbtrbak_test\tsingle\n40\tbtrbak_test\tsingle\n",
+                        "",
+                    )));
+                }
+                None
+            }),
+        );
+
+        let ids = workflow.list_btrbak_snapper_snapshot_ids().unwrap();
+        assert_eq!(ids, vec![41, 40]);
     }
 
     #[test]

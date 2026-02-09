@@ -418,7 +418,15 @@ pub fn snapshot_and_replace_safely(
 
     // Create temporary names
     let new_path = parent_dir.join(format!("{}.new", target_name));
-    let old_backup_path = parent_dir.join(format!("{}.{}", target_name, backup_suffix));
+    let old_backup_base = parent_dir.join(format!("{}.{}", target_name, backup_suffix));
+    let old_backup_path = next_available_backup_path(&old_backup_base)?;
+    if old_backup_path != old_backup_base {
+        ui::detail(&format!(
+            "Backup path {} already exists, using {} for this run",
+            old_backup_base.display(),
+            old_backup_path.display()
+        ));
+    }
 
     // Step 1: Create new read-write snapshot with temporary name
     create_snapshot_rw(snapshot_source, &new_path)?;
@@ -476,6 +484,41 @@ pub fn get_subvolume_name(path: &Path) -> Result<String, BackupError> {
         .map(|s| s.to_string_lossy().to_string())
 }
 
+/// Choose an available path for transient backup use.
+/// If `preferred` exists, appends `.1`, `.2`, ... until a free path is found.
+fn next_available_backup_path(preferred: &Path) -> Result<PathBuf, BackupError> {
+    if !preferred.exists() {
+        return Ok(preferred.to_path_buf());
+    }
+
+    let parent = preferred.parent().ok_or_else(|| {
+        BackupError::Btrfs(format!(
+            "Backup path has no parent directory: {}",
+            preferred.display()
+        ))
+    })?;
+
+    let file_name = preferred.file_name().ok_or_else(|| {
+        BackupError::Btrfs(format!(
+            "Backup path has no file name: {}",
+            preferred.display()
+        ))
+    })?;
+    let file_name = file_name.to_string_lossy();
+
+    for index in 1..=u32::MAX {
+        let candidate = parent.join(format!("{}.{}", file_name, index));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(BackupError::Btrfs(format!(
+        "Failed to find an available backup path for {}",
+        preferred.display()
+    )))
+}
+
 /// Send a subvolume and receive it safely with atomic replacement
 pub fn send_and_replace_safely(
     source: &Path,
@@ -511,9 +554,27 @@ pub fn send_and_replace_safely(
     let received_conflict = needs_rename && is_subvolume(&received_path)?;
 
     // Prepare backup paths
-    let target_backup_path = dest_dir.join(format!("{}.{}", subvol_name, backup_suffix));
+    let target_backup_base = dest_dir.join(format!("{}.{}", subvol_name, backup_suffix));
+    let target_backup_path = next_available_backup_path(&target_backup_base)?;
+    if target_backup_path != target_backup_base {
+        ui::detail(&format!(
+            "Backup path {} already exists, using {} for this run",
+            target_backup_base.display(),
+            target_backup_path.display()
+        ));
+    }
+
     let received_backup_path = if received_conflict {
-        Some(dest_dir.join(format!("{}.conflict", received_base_name)))
+        let received_backup_base = dest_dir.join(format!("{}.conflict", received_base_name));
+        let received_backup_path = next_available_backup_path(&received_backup_base)?;
+        if received_backup_path != received_backup_base {
+            ui::detail(&format!(
+                "Conflict backup path {} already exists, using {} for this run",
+                received_backup_base.display(),
+                received_backup_path.display()
+            ));
+        }
+        Some(received_backup_path)
     } else {
         None
     };
@@ -658,7 +719,15 @@ pub fn move_and_replace_safely(
 
     // Create temporary names
     let new_path = parent_dir.join(format!("{}.new", target_name));
-    let old_backup_path = parent_dir.join(format!("{}.{}", target_name, backup_suffix));
+    let old_backup_base = parent_dir.join(format!("{}.{}", target_name, backup_suffix));
+    let old_backup_path = next_available_backup_path(&old_backup_base)?;
+    if old_backup_path != old_backup_base {
+        ui::detail(&format!(
+            "Backup path {} already exists, using {} for this run",
+            old_backup_base.display(),
+            old_backup_path.display()
+        ));
+    }
 
     // Step 1: Move source to temporary name
     rename_subvolume(source_path, &new_path)?;
@@ -923,6 +992,25 @@ mod tests {
     fn test_get_subvolume_name_nested() {
         let result = get_subvolume_name(Path::new("/a/b/c/d"));
         assert_eq!(result.unwrap(), "d");
+    }
+
+    #[test]
+    fn test_next_available_backup_path_returns_preferred_when_missing() {
+        let td = tempfile::tempdir().unwrap();
+        let preferred = td.path().join("target.old");
+        let selected = next_available_backup_path(&preferred).unwrap();
+        assert_eq!(selected, preferred);
+    }
+
+    #[test]
+    fn test_next_available_backup_path_selects_incremental_suffix_on_conflict() {
+        let td = tempfile::tempdir().unwrap();
+        let preferred = td.path().join("target.old");
+        std::fs::create_dir_all(&preferred).unwrap();
+        std::fs::create_dir_all(td.path().join("target.old.1")).unwrap();
+
+        let selected = next_available_backup_path(&preferred).unwrap();
+        assert_eq!(selected, td.path().join("target.old.2"));
     }
 
     // ========================
@@ -1661,6 +1749,56 @@ mod tests {
 
             // No .old residue
             assert!(!dest.join("target.old").exists());
+        }
+
+        #[test]
+        fn test_btrfs_send_and_replace_safely_existing_with_stale_backup_path() {
+            if !ensure_root_for_root_required_tests() {
+                return;
+            }
+
+            let td = require_btrfs_test_dir!("send_replace_stale_backup");
+            let td_recv = require_btrfs_recv_dir!("send_replace_stale_backup");
+
+            // Create initial target via send
+            let src = td.path.join("src");
+            create_subvolume(&src).unwrap();
+            write_test_file(&src, "v1.txt", "v1");
+
+            let snap1 = td.path.join("snap1");
+            create_snapshot(&src, &snap1).unwrap();
+
+            let dest = td_recv.path.join("dest");
+            std::fs::create_dir_all(&dest).unwrap();
+
+            send_and_replace_safely(&snap1, None, &dest, "old", Some("target")).unwrap();
+
+            // Leave a stale backup path from a previous failed run.
+            let stale_backup = dest.join("target.old");
+            create_subvolume(&stale_backup).unwrap();
+            write_test_file(&stale_backup, "stale.txt", "keep-me");
+
+            // Update and replace again. This should use target.old.1 internally.
+            write_test_file(&src, "v2.txt", "v2");
+            let snap2 = td.path.join("snap2");
+            create_snapshot(&src, &snap2).unwrap();
+
+            send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target")).unwrap();
+
+            let target = dest.join("target");
+            assert!(is_subvolume(&target).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(target.join("v2.txt")).unwrap(),
+                "v2"
+            );
+
+            // The stale backup remains untouched and temporary backup is cleaned up.
+            assert!(is_subvolume(&stale_backup).unwrap());
+            assert_eq!(
+                std::fs::read_to_string(stale_backup.join("stale.txt")).unwrap(),
+                "keep-me"
+            );
+            assert!(!dest.join("target.old.1").exists());
         }
 
         #[test]

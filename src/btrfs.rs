@@ -102,23 +102,61 @@ pub fn create_subvolume(path: &Path) -> Result<(), BackupError> {
 
 /// Delete a subvolume (snapshot)
 pub fn delete_subvolume(path: &Path) -> Result<(), BackupError> {
-    let mut cmd = Command::new("btrfs");
-    cmd.arg("subvolume").arg("delete").arg(path);
-    ui::cmd_start(&ui::format_cmd(&cmd));
+    fn run_delete(path: &Path, recursive: bool) -> Result<Option<String>, BackupError> {
+        let mut cmd = Command::new("btrfs");
+        cmd.arg("subvolume").arg("delete");
+        if recursive {
+            cmd.arg("-R");
+        }
+        cmd.arg(path);
+        ui::cmd_start(&ui::format_cmd(&cmd));
 
-    let output = command_runner::output(&mut cmd)?;
+        let output = command_runner::output(&mut cmd)?;
+        if output.status.success() {
+            return Ok(None);
+        }
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        ui::cmd_stderr_output(&stderr);
-        return Err(BackupError::Btrfs(format!(
-            "Failed to delete subvolume {}: {}",
-            path.display(),
-            stderr
-        )));
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            ui::cmd_stderr_output(&stderr);
+            Ok(Some(stderr))
+        } else {
+            Ok(Some("command failed without stderr output".to_string()))
+        }
     }
 
-    Ok(())
+    let initial_failure = match run_delete(path, false)? {
+        None => return Ok(()),
+        Some(stderr) => stderr,
+    };
+
+    // Some system-created nested subvolumes (e.g. var/lib/{machines,portables}, var/tmp)
+    // make plain delete fail with "Directory not empty"; retry recursively.
+    if initial_failure
+        .to_ascii_lowercase()
+        .contains("directory not empty")
+    {
+        ui::detail(&format!(
+            "Subvolume {} contains nested subvolumes, retrying recursive delete",
+            path.display()
+        ));
+
+        return match run_delete(path, true)? {
+            None => Ok(()),
+            Some(recursive_failure) => Err(BackupError::Btrfs(format!(
+                "Failed to delete subvolume {}: {}. Recursive retry failed: {}",
+                path.display(),
+                initial_failure,
+                recursive_failure
+            ))),
+        };
+    }
+
+    Err(BackupError::Btrfs(format!(
+        "Failed to delete subvolume {}: {}",
+        path.display(),
+        initial_failure
+    )))
 }
 
 /// Send a subvolume to stdout (for backup) - returns process handle
@@ -1011,6 +1049,201 @@ mod tests {
 
         let selected = next_available_backup_path(&preferred).unwrap();
         assert_eq!(selected, td.path().join("target.old.2"));
+    }
+
+    #[test]
+    fn test_delete_subvolume_retries_directory_not_empty_with_recursive_delete() {
+        use std::sync::{Arc, Mutex};
+
+        let target = Path::new("/tmp/delete_retry");
+        let target_s = target.display().to_string();
+        let calls: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_hook = Arc::clone(&calls);
+        let target_for_hook = target_s.clone();
+
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(move |cmd| {
+                if crate::test_util::command_program(cmd) != "btrfs" {
+                    return None;
+                }
+
+                let args = crate::test_util::command_args(cmd);
+                calls_for_hook.lock().unwrap().push(args.clone());
+
+                if args
+                    == vec![
+                        "subvolume".to_string(),
+                        "delete".to_string(),
+                        target_for_hook.clone(),
+                    ]
+                {
+                    return Some(Ok(crate::test_util::mock_output(
+                        1,
+                        "",
+                        "ERROR: Could not destroy subvolume/snapshot: Directory not empty\n",
+                    )));
+                }
+
+                if args
+                    == vec![
+                        "subvolume".to_string(),
+                        "delete".to_string(),
+                        "-R".to_string(),
+                        target_for_hook.clone(),
+                    ]
+                {
+                    return Some(Ok(crate::test_util::mock_output(0, "", "")));
+                }
+
+                Some(Ok(crate::test_util::mock_output(
+                    1,
+                    "",
+                    "unexpected btrfs command in test\n",
+                )))
+            }),
+        );
+
+        delete_subvolume(target).unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            vec![
+                "subvolume".to_string(),
+                "delete".to_string(),
+                target_s.clone(),
+            ]
+        );
+        assert_eq!(
+            calls[1],
+            vec![
+                "subvolume".to_string(),
+                "delete".to_string(),
+                "-R".to_string(),
+                target_s,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_delete_subvolume_recursive_retry_failure_includes_both_errors() {
+        use std::sync::{Arc, Mutex};
+
+        let target = Path::new("/tmp/delete_retry_fail");
+        let target_s = target.display().to_string();
+        let calls: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_hook = Arc::clone(&calls);
+        let target_for_hook = target_s.clone();
+
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(move |cmd| {
+                if crate::test_util::command_program(cmd) != "btrfs" {
+                    return None;
+                }
+
+                let args = crate::test_util::command_args(cmd);
+                calls_for_hook.lock().unwrap().push(args.clone());
+
+                if args
+                    == vec![
+                        "subvolume".to_string(),
+                        "delete".to_string(),
+                        target_for_hook.clone(),
+                    ]
+                {
+                    return Some(Ok(crate::test_util::mock_output(
+                        1,
+                        "",
+                        "Directory not empty\n",
+                    )));
+                }
+
+                if args
+                    == vec![
+                        "subvolume".to_string(),
+                        "delete".to_string(),
+                        "-R".to_string(),
+                        target_for_hook.clone(),
+                    ]
+                {
+                    return Some(Ok(crate::test_util::mock_output(
+                        1,
+                        "",
+                        "Operation not permitted\n",
+                    )));
+                }
+
+                Some(Ok(crate::test_util::mock_output(
+                    1,
+                    "",
+                    "unexpected btrfs command in test\n",
+                )))
+            }),
+        );
+
+        let err = delete_subvolume(target).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Directory not empty"));
+        assert!(msg.contains("Recursive retry failed"));
+        assert!(msg.contains("Operation not permitted"));
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[test]
+    fn test_delete_subvolume_does_not_retry_non_directory_not_empty_failure() {
+        use std::sync::{Arc, Mutex};
+
+        let target = Path::new("/tmp/delete_no_retry");
+        let target_s = target.display().to_string();
+        let calls: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_hook = Arc::clone(&calls);
+        let target_for_hook = target_s.clone();
+
+        let _runner = crate::test_util::scoped_hook_command_runner(
+            crate::test_util::HookCommandRunner::new().with_output_hook(move |cmd| {
+                if crate::test_util::command_program(cmd) != "btrfs" {
+                    return None;
+                }
+
+                let args = crate::test_util::command_args(cmd);
+                calls_for_hook.lock().unwrap().push(args.clone());
+
+                if args
+                    == vec![
+                        "subvolume".to_string(),
+                        "delete".to_string(),
+                        target_for_hook.clone(),
+                    ]
+                {
+                    return Some(Ok(crate::test_util::mock_output(
+                        1,
+                        "",
+                        "Operation not permitted\n",
+                    )));
+                }
+
+                Some(Ok(crate::test_util::mock_output(
+                    1,
+                    "",
+                    "unexpected btrfs command in test\n",
+                )))
+            }),
+        );
+
+        let err = delete_subvolume(target).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Operation not permitted"));
+        assert!(!msg.contains("Recursive retry failed"));
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            vec!["subvolume".to_string(), "delete".to_string(), target_s]
+        );
     }
 
     // ========================

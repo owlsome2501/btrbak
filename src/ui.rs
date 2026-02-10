@@ -1,6 +1,5 @@
 use console::Style;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -15,7 +14,6 @@ enum Verbosity {
 struct UiState {
     verbosity: Verbosity,
     is_tty: bool,
-    mp: MultiProgress,
 }
 
 static UI: OnceLock<UiState> = OnceLock::new();
@@ -34,11 +32,7 @@ pub fn init(verbose: bool, quiet: bool) {
     // All output goes to stderr; set color support based on stderr TTY detection
     console::set_colors_enabled(is_tty);
 
-    let _ = UI.set(UiState {
-        verbosity,
-        is_tty,
-        mp: MultiProgress::new(),
-    });
+    let _ = UI.set(UiState { verbosity, is_tty });
 }
 
 fn state() -> &'static UiState {
@@ -50,20 +44,13 @@ fn state() -> &'static UiState {
         } else {
             Verbosity::Normal
         };
-        UiState {
-            verbosity,
-            is_tty,
-            mp: MultiProgress::new(),
-        }
+        UiState { verbosity, is_tty }
     })
 }
 
-/// Print a line to stderr, coordinated with any active progress bars.
-/// Uses `MultiProgress::println` which clears active progress bars before
-/// printing, then redraws them — preventing garbled output.
+/// Print a line to stderr.
 fn println_stderr(msg: impl AsRef<str>) {
-    let s = state();
-    let _ = s.mp.println(msg);
+    eprintln!("{}", msg.as_ref());
 }
 
 /// `\n== {msg} ==\n` (bold cyan)
@@ -230,54 +217,56 @@ pub fn format_bytes(bytes: u64) -> String {
 
 /// Handle for an active transfer progress display.
 ///
-/// Uses `indicatif::ProgressBar` managed by `MultiProgress`, so all output
-/// (progress + text messages) is properly coordinated without garbled lines.
-///
-/// On TTY: animated spinner with live transfer stats.
+/// On TTY: shows live transfer stats on a single line using carriage return.
 /// On non-TTY: progress hidden; final summary printed on `finish()`.
 ///
-/// Implements `Drop` to ensure the progress bar is cleared on error paths.
+/// This simple approach avoids ANSI escape sequences that cause display
+/// issues when the terminal is resized.
 pub struct TransferProgress {
-    bar: ProgressBar,
+    show_progress: bool,
 }
 
 /// Create a new transfer progress display.
 pub fn start_transfer() -> TransferProgress {
     let s = state();
-    let bar = if s.is_tty && s.verbosity != Verbosity::Quiet {
-        let bar = s.mp.add(ProgressBar::new_spinner());
-        bar.set_style(
-            ProgressStyle::with_template("    {spinner:.cyan.dim} {msg:.cyan.dim}").unwrap(),
-        );
-        bar.enable_steady_tick(std::time::Duration::from_millis(100));
-        bar
-    } else {
-        ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden())
-    };
-    TransferProgress { bar }
+    TransferProgress {
+        show_progress: s.is_tty && s.verbosity != Verbosity::Quiet,
+    }
 }
 
 impl TransferProgress {
     /// Update the progress display with current transfer stats.
     pub fn update(&self, transferred: u64, start: &Instant) {
-        let elapsed = start.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            (transferred as f64 / elapsed) as u64
-        } else {
-            0
-        };
-        self.bar.set_message(format!(
-            "{} | {}/s",
-            format_bytes(transferred),
-            format_bytes(speed),
-        ));
+        if self.show_progress {
+            let elapsed = start.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                (transferred as f64 / elapsed) as u64
+            } else {
+                0
+            };
+            let style = Style::new().dim().cyan();
+            let msg = format!(
+                "    {} | {}/s",
+                format_bytes(transferred),
+                format_bytes(speed),
+            );
+            // Use carriage return to overwrite the current line
+            // No complex ANSI sequences - just \r to move cursor to start
+            let _ = write!(std::io::stderr(), "\r{}", style.apply_to(&msg));
+            let _ = std::io::stderr().flush();
+        }
     }
 
     /// Finalize the progress display with summary stats.
     pub fn finish(self, transferred: u64, elapsed_secs: f64) {
-        self.bar.finish_and_clear();
-
         let s = state();
+
+        // Clear the progress line if we were showing one
+        if self.show_progress {
+            // Clear the current line using \r and spaces, then \r again
+            eprint!("\r{:80}\r", "");
+        }
+
         if s.verbosity == Verbosity::Quiet {
             return;
         }
@@ -294,15 +283,16 @@ impl TransferProgress {
             format_bytes(avg_speed),
         );
         let style = Style::new().dim().cyan();
-        println_stderr(format!("{}", style.apply_to(&content)));
+        eprintln!("{}", style.apply_to(&content));
     }
 }
 
 impl Drop for TransferProgress {
     fn drop(&mut self) {
-        // Ensure the progress bar is cleared if dropped without calling finish()
-        // (e.g. on error paths). No-op if already finished.
-        self.bar.finish_and_clear();
+        // Clear the progress line if dropped without calling finish()
+        if self.show_progress {
+            eprint!("\r{:80}\r", "");
+        }
     }
 }
 

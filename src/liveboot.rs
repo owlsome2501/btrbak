@@ -3,7 +3,7 @@ use crate::command_runner;
 use crate::config::{BootEntryConfig, LiveBootConfig, TargetConfig, TargetLocation};
 use crate::error::BackupError;
 use crate::ui;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const DEFAULT_RD_LUKS_OPTIONS: &str =
@@ -114,17 +114,27 @@ fn build_entry_options(
 }
 
 fn build_entry_content(entry_config: &BootEntryConfig, options: &[String]) -> String {
+    fn esp_asset_path(path: &Path) -> PathBuf {
+        match path.file_name() {
+            Some(file_name) => Path::new("/").join(file_name),
+            None => path.to_path_buf(),
+        }
+    }
+
+    let kernel_path = esp_asset_path(&entry_config.kernel);
+    let initramfs_path = esp_asset_path(&entry_config.initramfs);
     let mut entry_lines = vec![
         format!("title   {}", entry_config.title),
-        format!("linux   {}", entry_config.kernel.display()),
+        format!("linux   {}", kernel_path.display()),
     ];
 
     // Add microcode initrd before main initramfs (required for CPU microcode loading).
     if let Some(microcode) = &entry_config.microcode {
-        entry_lines.push(format!("initrd  {}", microcode.display()));
+        let microcode_path = esp_asset_path(microcode);
+        entry_lines.push(format!("initrd  {}", microcode_path.display()));
     }
 
-    entry_lines.push(format!("initrd  {}", entry_config.initramfs.display()));
+    entry_lines.push(format!("initrd  {}", initramfs_path.display()));
     entry_lines.push(format!("options {}", options.join(" ")));
     format!("{}\n", entry_lines.join("\n"))
 }
@@ -383,10 +393,11 @@ mod tests {
         let options = vec!["quiet".to_string(), "rw".to_string()];
 
         let content = build_entry_content(&entry_config, &options);
-        let micro_idx = content.find("initrd  /boot/amd-ucode.img").unwrap();
-        let initramfs_idx = content.find("initrd  /boot/initramfs-linux.img").unwrap();
+        let micro_idx = content.find("initrd  /amd-ucode.img").unwrap();
+        let initramfs_idx = content.find("initrd  /initramfs-linux.img").unwrap();
 
         assert!(micro_idx < initramfs_idx);
+        assert!(content.contains("linux   /vmlinuz-linux"));
         assert!(content.contains("options quiet rw"));
     }
 

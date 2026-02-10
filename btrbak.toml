@@ -104,13 +104,16 @@ location = "/mnt/backup"
 # (optional) Title shown in the boot menu.
 # Default: "Backup Environment"
 # title = "Backup Environment"
-# (optional) Kernel image path inside the live boot root subvolume.
+# (optional) Source kernel image path inside the live boot root subvolume.
+# The loader entry uses only the filename at ESP root (e.g. "/vmlinuz-linux").
 # Default: "/boot/vmlinuz-linux"
 # kernel = "/boot/vmlinuz-linux"
-# (optional) Initramfs image path inside the live boot root subvolume.
+# (optional) Source initramfs image path inside the live boot root subvolume.
+# The loader entry uses only the filename at ESP root (e.g. "/initramfs-linux.img").
 # Default: "/boot/initramfs-linux.img"
 # initramfs = "/boot/initramfs-linux.img"
-# (optional) CPU microcode image path (e.g. "/boot/amd-ucode.img").
+# (optional) Source CPU microcode image path (e.g. "/boot/amd-ucode.img").
+# The loader entry uses only the filename at ESP root (e.g. "/amd-ucode.img").
 # Default: none
 # microcode = "/boot/amd-ucode.img"
 # (optional) Additional kernel command line options.
@@ -124,7 +127,8 @@ location = "/mnt/backup"
 # Post-backup automation. Hooks only run when enable_live_boot = true and
 # a [live_boot] section is present.
 [hooks]
-# Copy kernel and initramfs from the live root to the ESP after each backup.
+# Copy kernel/initramfs (and fallback) from live root to ESP root after each backup.
+# This keeps files aligned with loader paths like "/vmlinuz-linux".
 # Default: true
 copy_kernel = true
 # Regenerate /etc/fstab in the live boot environment with correct UUIDs

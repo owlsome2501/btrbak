@@ -125,9 +125,9 @@ Required when `target.enable_live_boot = true`.
 | Field       | Required | Default                       | Description                                               |
 | ----------- | -------- | ----------------------------- | --------------------------------------------------------- |
 | `title`     | no       | `"Backup Environment"`        | Title displayed in the boot menu.                         |
-| `kernel`    | no       | `"/boot/vmlinuz-linux"`       | Kernel image path inside the live boot root subvolume.    |
-| `initramfs` | no       | `"/boot/initramfs-linux.img"` | Initramfs image path inside the live boot root subvolume. |
-| `microcode` | no       | —                             | CPU microcode image path (e.g. `"/boot/amd-ucode.img"`).  |
+| `kernel`    | no       | `"/boot/vmlinuz-linux"`       | Source kernel path inside live boot `root_vol`. Loader entry references `/<filename>` on ESP (for this default: `/vmlinuz-linux`). |
+| `initramfs` | no       | `"/boot/initramfs-linux.img"` | Source initramfs path inside live boot `root_vol`. Loader entry references `/<filename>` on ESP (for this default: `/initramfs-linux.img`). |
+| `microcode` | no       | —                             | Source CPU microcode path (e.g. `"/boot/amd-ucode.img"`). Loader entry references `/<filename>` on ESP (example: `/amd-ucode.img`). |
 | `options`   | no       | `[]`                          | Additional kernel command line options (excluding auto-managed `root=`, `rootflags=`, and `rd.luks.*`). |
 
 ### `[hooks]` — post-backup hooks
@@ -136,7 +136,7 @@ Hooks only run when `enable_live_boot = true` and a `[live_boot]` section is pre
 
 | Field                   | Required | Default | Description                                                                                           |
 | ----------------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------- |
-| `copy_kernel`           | no       | `true`  | Copy kernel, initramfs (and fallback) from the live root to the ESP.                                  |
+| `copy_kernel`           | no       | `true`  | Copy kernel, initramfs (and fallback) from live `root_vol` to the ESP root directory (matching loader `/<filename>` paths). |
 | `regenerate_fstab`      | no       | `true`  | Regenerate `/etc/fstab` in the live environment with correct UUIDs and subvolume mounts.              |
 | `remove_snapper_config` | no       | `true`  | Remove snapper configuration from the live environment to prevent it from modifying backup snapshots. |
 
@@ -167,7 +167,7 @@ Each source is processed independently — a failure in one does not block the o
 
 1. Creates `@` (live root) and `@snapshots` (backup storage) subvolumes on the target.
 2. Initializes systemd-boot on the ESP.
-3. Creates a bootloader entry with the configured kernel parameters.
+3. Creates a bootloader entry with the configured kernel parameters, referencing kernel/initrd files by filename at ESP root (for example `/vmlinuz-linux`, `/initramfs-linux.img`).
 
 **Post-backup updates** (automatic after each backup):
 
@@ -246,10 +246,19 @@ Each source directory must have a location for local snapshots (default: `.snaps
 ├── EFI/systemd/         systemd-boot files
 ├── vmlinuz-linux        kernel copied from live environment
 ├── initramfs-linux.img  initramfs copied from live environment
+├── amd-ucode.img        optional microcode copied from live environment
 └── loader/
     ├── loader.conf
     └── entries/
         └── backup.conf  boot menu entry
+```
+
+Example `backup.conf` entry paths:
+
+```ini
+linux   /vmlinuz-linux
+initrd  /amd-ucode.img
+initrd  /initramfs-linux.img
 ```
 
 ## Testing

@@ -1,14 +1,15 @@
 # Maintainer: Your Name <youremail@domain.com>
 pkgname=btrbak
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Incremental Btrfs backups with live boot environment and LUKS encryption support"
 arch=('x86_64' 'aarch64')
 url="https://github.com/owlsome2501/backup-btrfs"
 license=('MIT')
-depends=('btrfs-progs' 'util-linux' 'systemd')
-optdepends=('cryptsetup: LUKS encryption support'
-            'snapper: snapper integration for snapshot management')
+depends=('btrfs-progs' 'util-linux')
+optdepends=('cryptsetup: LUKS encryption target support'
+            'snapper: snapshot management with use_snapper = true'
+            'systemd: systemd-boot support for live boot (bootctl)')
 makedepends=('cargo' 'git')
 source=("git+https://github.com/owlsome2501/backup-btrfs.git")
 sha256sums=('SKIP')
@@ -39,7 +40,6 @@ package() {
 
   # Install documentation
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md
-  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" reference/* 2>/dev/null || true
 
   # Install license files
   for license in LICENSE*; do

@@ -676,12 +676,14 @@ fn backup_single_source(
         &snapshot_path,
         parent_snapshot_for_send,
         target_mount,
-    )?;
+    );
 
     ui::substep("Cleaning up old snapshots");
-    snapshot_workflow.cleanup_old_snapshot(local_parent_snapshot)?;
+    if let Err(e) = snapshot_workflow.cleanup_old_snapshot(local_parent_snapshot) {
+        ui::warning(&format!("Failed to clean up old local snapshots: {}", e));
+    }
 
-    Ok(stats)
+    stats
 }
 
 /// Main backup procedure.

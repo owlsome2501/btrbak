@@ -759,15 +759,11 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
     ui::section_end();
 
     if !errors.is_empty() {
-        let error_msg = errors
-            .iter()
-            .map(|(path, err)| format!("{}: {}", path.display(), err))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(BackupError::Btrfs(format!(
-            "Backup completed with errors: {}",
-            error_msg
-        )));
+        if errors.len() == 1 {
+            let (_, err) = errors.into_iter().next().unwrap();
+            return Err(err);
+        }
+        return Err(BackupError::Multiple(errors));
     }
 
     Ok(())

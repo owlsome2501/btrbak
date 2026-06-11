@@ -22,6 +22,17 @@ pub enum BackupError {
 
     #[error("Lock error: {0}")]
     Lock(String),
+
+    #[error("Backup completed with errors:\n{}", format_multiple(errors))]
+    Multiple(Vec<(std::path::PathBuf, BackupError)>),
+}
+
+fn format_multiple(errors: &[(std::path::PathBuf, BackupError)]) -> String {
+    errors
+        .iter()
+        .map(|(path, err)| format!("  {}: {}", path.display(), err))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl BackupError {
@@ -126,6 +137,15 @@ impl BackupError {
                 if hints.is_empty() {
                     hints.push("Check the hook configuration in your config file");
                 }
+                hints
+            }
+            BackupError::Multiple(errors) => {
+                let mut hints = Vec::new();
+                for (_, err) in errors {
+                    hints.extend(err.hints());
+                }
+                hints.sort();
+                hints.dedup();
                 hints
             }
         }
@@ -316,5 +336,64 @@ mod tests {
         let err = BackupError::Lock("failed to create lock".to_string());
         let hints = err.hints();
         assert!(hints.iter().any(|h| h.contains("/tmp is writable")));
+    }
+
+    #[test]
+    fn test_multiple_error_display() {
+        let errors = vec![
+            (
+                std::path::PathBuf::from("/src"),
+                BackupError::Btrfs("send failed".to_string()),
+            ),
+            (
+                std::path::PathBuf::from("/home"),
+                BackupError::Mount("mount failed".to_string()),
+            ),
+        ];
+        let err = BackupError::Multiple(errors);
+        let msg = err.to_string();
+        assert!(msg.contains("Backup completed with errors"));
+        assert!(msg.contains("/src: Btrfs operation failed: send failed"));
+        assert!(msg.contains("/home: Mount error: mount failed"));
+    }
+
+    #[test]
+    fn test_hints_multiple_aggregates_and_deduplicates() {
+        let errors = vec![
+            (
+                std::path::PathBuf::from("/src"),
+                BackupError::Btrfs("Permission denied on /mnt".to_string()),
+            ),
+            (
+                std::path::PathBuf::from("/home"),
+                BackupError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                )),
+            ),
+        ];
+        let err = BackupError::Multiple(errors);
+        let hints = err.hints();
+        // Both sub-errors suggest sudo — dedup should keep only one copy
+        let sudo_count = hints.iter().filter(|h| h.contains("sudo")).count();
+        assert_eq!(sudo_count, 1);
+    }
+
+    #[test]
+    fn test_hints_multiple_collects_distinct_hints() {
+        let errors = vec![
+            (
+                std::path::PathBuf::from("/src"),
+                BackupError::Btrfs("Failed to send subvolume".to_string()),
+            ),
+            (
+                std::path::PathBuf::from("/home"),
+                BackupError::Config(anyhow::anyhow!("bad config")),
+            ),
+        ];
+        let err = BackupError::Multiple(errors);
+        let hints = err.hints();
+        assert!(hints.iter().any(|h| h.contains("free space")));
+        assert!(hints.iter().any(|h| h.contains("validate")));
     }
 }

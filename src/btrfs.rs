@@ -503,12 +503,12 @@ pub fn snapshot_and_replace_safely(
     // Step 4: If we had an old target and backup succeeded, delete the backup
     if target_exists {
         if let Err(e) = delete_subvolume(&old_backup_path) {
-            return Err(BackupError::Btrfs(format!(
+            ui::warning(&format!(
                 "Replaced {} successfully, but failed to delete backup {}: {}. Manual cleanup may be required.",
                 target_path.display(),
                 old_backup_path.display(),
                 e
-            )));
+            ));
         }
     }
 
@@ -714,25 +714,25 @@ pub fn send_and_replace_safely(
     // Clean up backup subvolumes
     if target_exists {
         if let Err(e) = delete_subvolume(&target_backup_path) {
-            return Err(BackupError::Btrfs(format!(
+            ui::warning(&format!(
                 "Replaced {} successfully, but failed to delete backup {}: {}. Manual cleanup may be required.",
                 target_path.display(),
                 target_backup_path.display(),
                 e
-            )));
+            ));
         }
     }
 
     // Restore conflicting subvolume that was renamed to .conflict
     if let Some(backup) = received_backup_path {
         if let Err(e) = rename_subvolume(&backup, &received_path) {
-            return Err(BackupError::Btrfs(format!(
+            ui::warning(&format!(
                 "Replaced {} successfully, but failed to restore preserved conflict {} -> {}: {}. Manual recovery required.",
                 target_path.display(),
                 backup.display(),
                 received_path.display(),
                 e
-            )));
+            ));
         }
     }
 
@@ -823,12 +823,12 @@ pub fn move_and_replace_safely(
     // Step 4: If we had an old target and move succeeded, delete the backup
     if target_exists {
         if let Err(e) = delete_subvolume(&old_backup_path) {
-            return Err(BackupError::Btrfs(format!(
+            ui::warning(&format!(
                 "Replaced {} successfully, but failed to delete backup {}: {}. Manual cleanup may be required.",
                 target_path.display(),
                 old_backup_path.display(),
                 e
-            )));
+            ));
         }
     }
 

@@ -484,10 +484,7 @@ fn compute_backup_steps(config: &Config) -> usize {
     let mut steps = 0;
     steps += 1;
     steps += config.sources.len();
-    if config.target.enable_live_boot {
-        steps += 1;
-    }
-    steps += 1;
+    steps += 1; // summary
     steps
 }
 
@@ -705,7 +702,7 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
     }
 
     let backup_start = Instant::now();
-    let total_steps = compute_backup_steps(&config);
+    let mut total_steps = compute_backup_steps(&config);
     let mut current_step = 0;
 
     current_step += 1;
@@ -743,6 +740,7 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
     }
 
     if config.target.enable_live_boot && errors.is_empty() {
+        total_steps += 1;
         current_step += 1;
         ui::step(current_step, total_steps, "Updating live boot environment");
 
@@ -855,8 +853,8 @@ mod tests {
     #[test]
     fn test_compute_steps_with_live_boot() {
         let config = make_config(3, true);
-        // 1 mount + 3 sources + 1 live boot + 1 summary = 6
-        assert_eq!(compute_backup_steps(&config), 6);
+        // 1 mount + 3 sources + 1 summary = 5 (live boot added dynamically)
+        assert_eq!(compute_backup_steps(&config), 5);
     }
 
     #[test]

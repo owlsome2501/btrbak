@@ -275,6 +275,7 @@ pub fn send_and_receive_piped(
     source: &Path,
     parent: Option<&Path>,
     dest_dir: &Path,
+    progress: &crate::ui::TransferProgress,
 ) -> Result<TransferStats, BackupError> {
     // Display as a single logical piped command
     let send_part = if let Some(p) = parent {
@@ -302,24 +303,22 @@ pub fn send_and_receive_piped(
         .take()
         .ok_or_else(|| BackupError::Btrfs("Failed to get stdin for receive process".to_string()))?;
 
-    let tp = ui::start_transfer();
     let start = std::time::Instant::now();
 
     // Try splice (zero-copy), fall back to userspace copy on EINVAL
     let total_bytes = match splice_transfer(&send_stdout, &recv_stdin, |total| {
-        tp.update(total, &start);
+        progress.update(total, &start);
     }) {
         Ok(total) => total,
         Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
             copy_transfer(&mut send_stdout, &mut recv_stdin, |total| {
-                tp.update(total, &start);
+                progress.update(total, &start);
             })?
         }
         Err(e) => return Err(BackupError::Io(e)),
     };
 
     let elapsed = start.elapsed().as_secs_f64();
-    tp.finish(total_bytes, elapsed);
 
     // Explicitly close stdin so receive process sees EOF
     drop(recv_stdin);
@@ -564,6 +563,7 @@ pub fn send_and_replace_safely(
     dest_dir: &Path,
     backup_suffix: &str,
     target_name: Option<&str>,
+    progress: &crate::ui::TransferProgress,
 ) -> Result<TransferStats, BackupError> {
     // Determine target subvolume name
     let subvol_name = match target_name {
@@ -663,7 +663,7 @@ pub fn send_and_replace_safely(
     };
 
     // Receive the subvolume directly into dest_dir
-    let stats = match send_and_receive_piped(source, parent, dest_dir) {
+    let stats = match send_and_receive_piped(source, parent, dest_dir, progress) {
         Ok(stats) => stats,
         Err(e) => {
             if let Err(restore_err) = restore_renamed() {
@@ -1774,7 +1774,8 @@ mod tests {
             let dest = td_recv.path.join("dest");
             std::fs::create_dir_all(&dest).unwrap();
 
-            let stats = send_and_receive_piped(&snap, None, &dest).unwrap();
+            let tp = ui::start_transfer();
+            let stats = send_and_receive_piped(&snap, None, &dest, &tp).unwrap();
             assert!(stats.bytes > 0);
 
             // The received subvolume keeps the snapshot name
@@ -1806,7 +1807,8 @@ mod tests {
             std::fs::create_dir_all(&dest).unwrap();
 
             // Full send of snap1
-            send_and_receive_piped(&snap1, None, &dest).unwrap();
+            let tp = ui::start_transfer();
+            send_and_receive_piped(&snap1, None, &dest, &tp).unwrap();
 
             // Add more data
             write_test_file(&src, "file2.txt", "second");
@@ -1814,7 +1816,8 @@ mod tests {
             create_snapshot(&src, &snap2).unwrap();
 
             // Incremental send of snap2 with snap1 as parent
-            let stats = send_and_receive_piped(&snap2, Some(&snap1), &dest).unwrap();
+            let tp = ui::start_transfer();
+            let stats = send_and_receive_piped(&snap2, Some(&snap1), &dest, &tp).unwrap();
             assert!(stats.bytes > 0);
 
             let received = dest.join("snap2");
@@ -1864,7 +1867,8 @@ mod tests {
                     None
                 }));
 
-            let result = send_and_receive_piped(&snap, None, &dest);
+            let tp = ui::start_transfer();
+            let result = send_and_receive_piped(&snap, None, &dest, &tp);
             assert!(result.is_err());
             let msg = format!("{}", result.err().unwrap());
             assert!(msg.contains("Failed to send subvolume"));
@@ -1907,7 +1911,8 @@ mod tests {
                     None
                 }));
 
-            let result = send_and_receive_piped(&snap, None, &dest);
+            let tp = ui::start_transfer();
+            let result = send_and_receive_piped(&snap, None, &dest, &tp);
             assert!(result.is_err());
             let msg = format!("{}", result.err().unwrap());
             assert!(msg.contains("Failed to receive subvolume"));
@@ -1933,7 +1938,8 @@ mod tests {
             let dest = td_recv.path.join("dest");
             std::fs::create_dir_all(&dest).unwrap();
 
-            let stats = send_and_replace_safely(&snap, None, &dest, "old", Some("target")).unwrap();
+            let tp = ui::start_transfer();
+            let stats = send_and_replace_safely(&snap, None, &dest, "old", Some("target"), &tp).unwrap();
             assert!(stats.bytes > 0);
 
             let target = dest.join("target");
@@ -1964,14 +1970,16 @@ mod tests {
             let dest = td_recv.path.join("dest");
             std::fs::create_dir_all(&dest).unwrap();
 
-            send_and_replace_safely(&snap1, None, &dest, "old", Some("target")).unwrap();
+            let tp1 = ui::start_transfer();
+            send_and_replace_safely(&snap1, None, &dest, "old", Some("target"), &tp1).unwrap();
 
             // Now update and replace
             write_test_file(&src, "v2.txt", "v2");
             let snap2 = td.path.join("snap2");
             create_snapshot(&src, &snap2).unwrap();
 
-            send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target")).unwrap();
+            let tp2 = ui::start_transfer();
+            send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target"), &tp2).unwrap();
 
             let target = dest.join("target");
             assert!(is_subvolume(&target).unwrap());
@@ -2004,7 +2012,8 @@ mod tests {
             let dest = td_recv.path.join("dest");
             std::fs::create_dir_all(&dest).unwrap();
 
-            send_and_replace_safely(&snap1, None, &dest, "old", Some("target")).unwrap();
+            let tp_sb1 = ui::start_transfer();
+            send_and_replace_safely(&snap1, None, &dest, "old", Some("target"), &tp_sb1).unwrap();
 
             // Leave a stale backup path from a previous failed run.
             let stale_backup = dest.join("target.old");
@@ -2016,7 +2025,8 @@ mod tests {
             let snap2 = td.path.join("snap2");
             create_snapshot(&src, &snap2).unwrap();
 
-            send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target")).unwrap();
+            let tp_sb2 = ui::start_transfer();
+            send_and_replace_safely(&snap2, Some(&snap1), &dest, "old", Some("target"), &tp_sb2).unwrap();
 
             let target = dest.join("target");
             assert!(is_subvolume(&target).unwrap());
@@ -2059,7 +2069,8 @@ mod tests {
             create_subvolume(&existing_received).unwrap();
             write_test_file(&existing_received, "keep.txt", "keep-me");
 
-            send_and_replace_safely(&snap, None, &dest, "old", Some("target")).unwrap();
+            let tp_c = ui::start_transfer();
+            send_and_replace_safely(&snap, None, &dest, "old", Some("target"), &tp_c).unwrap();
 
             let target = dest.join("target");
             assert!(is_subvolume(&target).unwrap());
@@ -2136,7 +2147,8 @@ mod tests {
                 }),
             );
 
-            let result = send_and_replace_safely(&snap, None, &dest, "old", Some("target"));
+            let tp_rt = ui::start_transfer();
+            let result = send_and_replace_safely(&snap, None, &dest, "old", Some("target"), &tp_rt);
             assert!(result.is_err());
 
             // Old target must be restored in-place with no residue.
@@ -2211,7 +2223,8 @@ mod tests {
                 }),
             );
 
-            let result = send_and_replace_safely(&snap, None, &dest, "old", Some("target"));
+            let tp_rc = ui::start_transfer();
+            let result = send_and_replace_safely(&snap, None, &dest, "old", Some("target"), &tp_rc);
             assert!(result.is_err());
 
             // Both renamed originals must be restored, and temp backups removed.

@@ -621,13 +621,16 @@ fn send_snapshot(
         fs::create_dir_all(&target_parent_dir)?;
     }
 
+    let tp = ui::start_transfer();
     let stats = btrfs::send_and_replace_safely(
         snapshot_path,
         parent_snapshot,
         &target_parent_dir,
         "old",
         Some(&target_subvol_name),
+        &tp,
     )?;
+    tp.finish(stats.bytes, stats.elapsed_secs);
 
     ui::detail(&format!(
         "Sent snapshot to: {}/{}",

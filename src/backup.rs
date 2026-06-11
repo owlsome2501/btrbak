@@ -93,14 +93,13 @@ impl ConfigLock {
 
 impl Drop for ConfigLock {
     fn drop(&mut self) {
-        let Ok(_namespace_guard) = LockNamespaceGuard::acquire(&self.lock_parent) else {
+        if LockNamespaceGuard::acquire(&self.lock_parent).is_ok() {
+            if let Some(lock_file) = self.lock_file.take() {
+                let _ = lock_file.unlock();
+                drop(lock_file);
+            }
+        } else {
             self.lock_file.take();
-            return;
-        };
-
-        if let Some(lock_file) = self.lock_file.take() {
-            let _ = lock_file.unlock();
-            drop(lock_file);
         }
 
         let _ = fs::remove_file(&self.lock_path);

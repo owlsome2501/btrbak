@@ -92,7 +92,7 @@ names automatically: `/` -> `root_vol`, `/home` -> `home_vol`,
 
 | Field                 | Required | Default                                        | Description                                                                                                                                                                                       |
 | --------------------- | -------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `location`            | yes      | —                                              | Backup destination. Accepts a mounted path (`/mnt/backup`) or a device identifier (`/dev/sda1`, `UUID=...`, `LABEL=...`, `PARTUUID=...`). Device identifiers are automatically mounted/unmounted. |
+| `location`            | yes      | —                                              | Backup destination. Accepts a mounted path (`/mnt/backup`) or a device identifier (`UUID=...`, `LABEL=...`, `PARTUUID=...`). Device identifiers are automatically mounted/unmounted. |
 | `enable_live_boot`    | no       | `false`                                        | Enable live boot environment support. Requires a `[live_boot]` section.                                                                                                                           |
 | `snapshot_subvolume`  | no       | `"@snapshots"` (live boot) / `"."` (otherwise) | Subvolume name for storing backup snapshots on the target.                                                                                                                                        |
 | `live_boot_subvolume` | no       | `"@"`                                          | Subvolume name for the live boot root environment.                                                                                                                                                |
@@ -116,7 +116,7 @@ Required when `target.enable_live_boot = true`.
 
 | Field          | Required | Default         | Description                                                                                                                                                 |
 | -------------- | -------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `esp_location` | yes      | —               | ESP location. Accepts a mounted path or device identifier (`/dev/...`, `UUID=...`, `LABEL=...`, `PARTUUID=...`). Device identifiers are auto-mounted.   |
+| `esp_location` | yes      | —               | ESP location. Accepts a mounted path or device identifier (`UUID=...`, `LABEL=...`, `PARTUUID=...`). Device identifiers are auto-mounted.   |
 | `esp_path`     | no       | `"/efi"`        | Mount point path inside live boot `root_vol` (used for generated `/etc/fstab`). Example: `"/efi"` or `"/boot/efi"`.                                     |
 | `bootloader`   | no       | `"SystemdBoot"` | Bootloader type. Currently only `SystemdBoot` is supported.                                                                                               |
 

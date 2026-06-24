@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn test_hints_mount_failed() {
-        let err = BackupError::Mount("Failed to mount /dev/sda1".to_string());
+        let err = BackupError::Mount("Failed to mount /mnt/backup".to_string());
         let hints = err.hints();
         assert!(hints.iter().any(|h| h.contains("mounting manually")));
     }

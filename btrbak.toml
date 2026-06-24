@@ -50,12 +50,13 @@ path = "/"
 [target]
 # (required) Backup destination. Accepted formats:
 #   "/mnt/backup"                                  — already-mounted path
-#   "/dev/sda1"                                    — device path
 #   "UUID=12345678-1234-1234-1234-123456789012"    — device by UUID
 #   "LABEL=backup_drive"                           — device by label
 #   "PARTUUID=abcd-1234"                           — device by partition UUID
-# Paths starting with /dev/, UUID=, LABEL=, or PARTUUID= are treated as
+# Paths starting with UUID=, LABEL=, or PARTUUID= are treated as
 # device identifiers and will be automatically mounted/unmounted.
+# /dev/ paths are NOT recognized as device identifiers — use a stable
+# identifier (UUID, LABEL, PARTUUID) instead.
 location = "/mnt/backup"
 # (optional) Enable live boot environment support.
 # Default: false

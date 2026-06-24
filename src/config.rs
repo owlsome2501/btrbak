@@ -96,9 +96,10 @@ impl<'de> serde::Deserialize<'de> for TargetLocation {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        // Heuristic to determine if string is a device identifier
-        if s.starts_with("/dev/")
-            || s.starts_with("UUID=")
+        // Heuristic to determine if string is a device identifier.
+        // /dev/ paths are NOT treated as device identifiers — they are
+        // unstable across reboots. Use UUID=, LABEL=, or PARTUUID= instead.
+        if s.starts_with("UUID=")
             || s.starts_with("LABEL=")
             || s.starts_with("PARTUUID=")
         {
@@ -435,9 +436,9 @@ mod tests {
             path = "/home"
 
             [target]
-            location = "/dev/sda1"
+            location = "UUID=abcd-1234"
             enable_live_boot = false
-            
+
             [target.encryption]
             keyfile = "/path/to/keyfile"
             passphrase_env = "BACKUP_PASSPHRASE"
@@ -480,15 +481,17 @@ mod tests {
 
     #[test]
     fn test_target_location_dev_path() {
+        // /dev/ paths are no longer treated as device identifiers —
+        // they are classified as mounted paths to avoid ambiguity.
         let toml_content = r#"
             name = "test"
             [[sources]]
             path = "/"
             [target]
-            location = "/dev/sda1"
+            location = "UUID=abcd-1234"
         "#;
         let config: Config = toml::from_str(toml_content).unwrap();
-        assert!(matches!(config.target.location, TargetLocation::Device(_)));
+        assert!(matches!(config.target.location, TargetLocation::MountedPath(_)));
     }
 
     #[test]
@@ -607,10 +610,10 @@ mod tests {
             [[sources]]
             path = "/"
             [target]
-            location = "/dev/sda1"
+            location = "UUID=abcd-1234"
             enable_live_boot = true
             [live_boot]
-            esp_location = "/dev/sda2"
+            esp_location = "UUID=efgh-5678"
             esp_path = "/efi"
             bootloader = "SystemdBoot"
             [live_boot.boot_entry]
@@ -634,7 +637,7 @@ mod tests {
             [[sources]]
             path = "/"
             [target]
-            location = "/dev/sda1"
+            location = "UUID=abcd-1234"
             [live_boot]
             esp_location = "/efi"
         "#;
@@ -661,7 +664,7 @@ mod tests {
             [[sources]]
             path = "/"
             [target]
-            location = "/dev/sda1"
+            location = "UUID=abcd-1234"
             [live_boot]
             esp_location = "/efi"
             [live_boot.boot_entry]
@@ -677,7 +680,7 @@ mod tests {
     #[test]
     fn test_live_boot_esp_path_helpers() {
         let live_boot = LiveBootConfig {
-            esp_location: TargetLocation::Device("/dev/sda1".to_string()),
+            esp_location: TargetLocation::Device("UUID=abcd-1234".to_string()),
             esp_path: PathBuf::from("/boot/efi"),
             bootloader: BootloaderType::SystemdBoot,
             boot_entry: BootEntryConfig::default(),
@@ -691,7 +694,7 @@ mod tests {
     #[test]
     fn test_live_boot_esp_path_rejects_parent_dir() {
         let live_boot = LiveBootConfig {
-            esp_location: TargetLocation::Device("/dev/sda1".to_string()),
+            esp_location: TargetLocation::Device("UUID=abcd-1234".to_string()),
             esp_path: PathBuf::from("/boot/../efi"),
             bootloader: BootloaderType::SystemdBoot,
             boot_entry: BootEntryConfig::default(),
@@ -743,7 +746,7 @@ mod tests {
             [[sources]]
             path = "/"
             [target]
-            location = "/dev/sda1"
+            location = "UUID=abcd-1234"
             [target.encryption]
             keyfile = "/tmp/key"
         "#;
@@ -759,7 +762,7 @@ mod tests {
             [[sources]]
             path = "/"
             [target]
-            location = "/dev/sda1"
+            location = "UUID=abcd-1234"
             [target.encryption]
             mapping_name = "custom"
         "#;

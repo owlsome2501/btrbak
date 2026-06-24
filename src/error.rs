@@ -24,7 +24,9 @@ pub enum BackupError {
     Lock(String),
 
     #[error("Backup completed with errors:\n{}", format_multiple(errors))]
-    Multiple(Vec<(std::path::PathBuf, BackupError)>),
+    Multiple {
+        errors: Vec<(std::path::PathBuf, BackupError)>,
+    },
 }
 
 fn format_multiple(errors: &[(std::path::PathBuf, BackupError)]) -> String {
@@ -139,7 +141,7 @@ impl BackupError {
                 }
                 hints
             }
-            BackupError::Multiple(errors) => {
+            BackupError::Multiple { errors } => {
                 let mut hints = Vec::new();
                 for (_, err) in errors {
                     hints.extend(err.hints());
@@ -350,7 +352,7 @@ mod tests {
                 BackupError::Mount("mount failed".to_string()),
             ),
         ];
-        let err = BackupError::Multiple(errors);
+        let err = BackupError::Multiple { errors };
         let msg = err.to_string();
         assert!(msg.contains("Backup completed with errors"));
         assert!(msg.contains("/src: Btrfs operation failed: send failed"));
@@ -372,7 +374,7 @@ mod tests {
                 )),
             ),
         ];
-        let err = BackupError::Multiple(errors);
+        let err = BackupError::Multiple { errors };
         let hints = err.hints();
         // Both sub-errors suggest sudo — dedup should keep only one copy
         let sudo_count = hints.iter().filter(|h| h.contains("sudo")).count();
@@ -391,7 +393,7 @@ mod tests {
                 BackupError::Config(anyhow::anyhow!("bad config")),
             ),
         ];
-        let err = BackupError::Multiple(errors);
+        let err = BackupError::Multiple { errors };
         let hints = err.hints();
         assert!(hints.iter().any(|h| h.contains("free space")));
         assert!(hints.iter().any(|h| h.contains("validate")));

@@ -762,7 +762,7 @@ pub fn run_backup(config_path: &Path, dry_run: bool) -> Result<(), BackupError> 
             let (_, err) = errors.into_iter().next().unwrap();
             return Err(err);
         }
-        return Err(BackupError::Multiple(errors));
+        return Err(BackupError::Multiple { errors });
     }
 
     Ok(())

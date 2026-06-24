@@ -163,7 +163,7 @@ fn create_boot_entry(
     let entries_dir = esp_path.join("loader/entries");
     std::fs::create_dir_all(&entries_dir)?;
 
-    let entry_file = entries_dir.join(format!("{}.conf", entry_config.title.replace(' ', "_")));
+    let entry_file = entries_dir.join("btrbak.conf");
     std::fs::write(&entry_file, entry_content)?;
 
     Ok(())

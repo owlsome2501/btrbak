@@ -110,7 +110,10 @@ fn copy_kernel_to_esp(
             kernel_dest.display()
         ));
     } else {
-        ui::warning(&format!("Kernel not found at: {}", kernel_source.display()));
+        return Err(BackupError::Hook(format!(
+            "Kernel not found at: {}",
+            kernel_source.display()
+        )));
     }
 
     // Copy initramfs
@@ -129,10 +132,10 @@ fn copy_kernel_to_esp(
             initramfs_dest.display()
         ));
     } else {
-        ui::warning(&format!(
+        return Err(BackupError::Hook(format!(
             "Initramfs not found at: {}",
             initramfs_source.display()
-        ));
+        )));
     }
 
     // Copy fallback initramfs if exists
@@ -547,11 +550,10 @@ mod tests {
             options: vec![],
         };
 
-        // Should succeed (just warns, doesn't error)
+        // Missing kernel should return an error
         let result = copy_kernel_to_esp(&root_vol, &esp, &boot_entry);
-        assert!(result.is_ok());
-        // No files should be copied
-        assert!(!esp.join("vmlinuz-linux").exists());
+        assert!(result.is_err());
+        assert!(format!("{}", result.err().unwrap()).contains("Kernel not found"));
     }
 
     // generate_basic_fstab tests

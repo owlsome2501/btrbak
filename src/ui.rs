@@ -250,9 +250,8 @@ impl TransferProgress {
                 format_bytes(transferred),
                 format_bytes(speed),
             );
-            // Use carriage return to overwrite the current line
-            // No complex ANSI sequences - just \r to move cursor to start
-            let _ = write!(std::io::stderr(), "\r{}", style.apply_to(&msg));
+            // Clear the entire line (ANSI EL) then overwrite with new status
+            let _ = write!(std::io::stderr(), "\r\x1b[2K{}", style.apply_to(&msg));
             let _ = std::io::stderr().flush();
         }
     }
@@ -263,8 +262,8 @@ impl TransferProgress {
 
         // Clear the progress line if we were showing one
         if self.show_progress {
-            // Clear the current line using \r and spaces, then \r again
-            eprint!("\r{:80}\r", "");
+            // Clear the entire line using ANSI EL escape sequence
+            eprint!("\r\x1b[2K");
         }
 
         if s.verbosity == Verbosity::Quiet {
@@ -291,7 +290,7 @@ impl Drop for TransferProgress {
     fn drop(&mut self) {
         // Clear the progress line if dropped without calling finish()
         if self.show_progress {
-            eprint!("\r{:80}\r", "");
+            eprint!("\r\x1b[2K");
         }
     }
 }

@@ -1,4 +1,4 @@
-.PHONY: build release check clippy fmt fmt-check test test-unit test-no-root test-root-required test-prepare-root-env test-cleanup-root-env test-integration clean install
+.PHONY: build release check clippy fmt fmt-check test test-unit test-no-root test-root-required test-prepare-root-env test-cleanup-root-env test-integration clean install package
 
 build:
 	cargo build
@@ -42,3 +42,8 @@ clean:
 
 install:
 	cargo install --path .
+
+package:
+	mkdir -p build
+	cp -f PKGBUILD build/PKGBUILD
+	cd build && makepkg -p PKGBUILD -Csfc
